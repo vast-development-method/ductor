@@ -444,4 +444,3 @@ management. Existing Docker packages and Incus installations are retained.
 Ductor is licensed under [Apache-2.0](LICENSE). It installs upstream services;
 those projects retain their own licenses. The executable is original integration
 code and does not include copied Octojoom installer code.
-
