@@ -1,0 +1,7 @@
+/.ductor/
+/coverage/
+*.log
+*.env
+*.pem
+*.key
+bao-init*.json
