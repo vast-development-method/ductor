@@ -7,9 +7,6 @@ if command -v shellcheck >/dev/null 2>&1; then
 else
     printf 'SKIP ShellCheck: install shellcheck to run the same lint gate as CI.\n'
 fi
-for test in installer inventory platform codex services services-ssh services-access-upgrade services-secrets paperclip bindings provider profiles console broker apply spawn conversation; do
-    bash "$ROOT/tests/$test.sh"
-done
 guest_status=0
 if [[ $EUID == 0 ]]; then
     bash "$ROOT/tests/guest.sh" || guest_status=$?
@@ -22,4 +19,7 @@ else
     guest_status=77
 fi
 [[ $guest_status == 0 || $guest_status == 77 ]] || exit "$guest_status"
+for test in installer inventory platform codex services services-ssh services-access-upgrade services-secrets paperclip bindings provider profiles console broker apply spawn conversation; do
+    bash "$ROOT/tests/$test.sh"
+done
 printf 'All Ductor offline checks passed.\n'
