@@ -188,10 +188,10 @@ incus() {
 }
 printf '#!/usr/bin/env bash\n# DUCTOR_SINGLE_FILE\n' > "$TEST_DIR/ductor"
 export DUCTOR_SELF=$TEST_DIR/ductor
-if (GUEST_MACHINE_ID=ffffffffffffffffffffffffffffffff # The production function is sourced above; later overrides isolate another fixture.
-# shellcheck disable=SC2218
-ductor_bindings_deploy project-implementer >/dev/null 2>&1); then echo 'Wrong VM identity accepted'; exit 1; fi
+if (GUEST_MACHINE_ID=ffffffffffffffffffffffffffffffff ductor_bindings_deploy project-implementer >/dev/null 2>&1); then echo 'Wrong VM identity accepted'; exit 1; fi
 ! rg -q '^file push ' "$TEST_DIR/incus-calls"
+# The production function is sourced above; the final fixture overrides it.
+# shellcheck disable=SC2218
 ductor_bindings_deploy project-implementer >/dev/null 2>&1
 test -f "$DUCTOR_STATE_DIR/bindings/project-implementer/deployed.json"
 rg -q -- '--user 1000 --group 1000 --cwd /tmp --env DUCTOR_BINDING_NAME=project-implementer -- /usr/local/bin/ductor-runtime --ductor-check' "$TEST_DIR/incus-calls"
