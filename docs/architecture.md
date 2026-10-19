@@ -7,6 +7,14 @@ configuration templates, plus the JavaScript adapter generated for the native
 Paperclip plugin SDK. Generated configuration and upstream service data live
 outside the executable. No second Ductor package is downloaded at runtime.
 
+The controller can run directly on a Linux host or inside the versioned Ductor
+image. The container packages the same executable and its administration tools;
+shared services run as sibling containers on the host Docker engine, and agent
+VMs remain on Incus. The controller uses a persistent identity-mounted state
+directory, host networking, and the host Docker socket. It runs its own SSH broker
+and lease reaper without systemd. Do not run a host controller and container
+controller concurrently against the same state. See [container operations](container.md).
+
 ## Ownership
 
 | State or decision | Authority |
@@ -67,8 +75,9 @@ work and are not supplied by the first version.
 - Paperclip's separate native SSH environment path remains available for manually
   prepared workers, with verified host keys and an explicit service identity.
 - Use authenticated HTTPS through the trusted gateway for worker memory and tool
-  requests across hosts. The default Compose loopback ports support local access
-  and SSH tunnels; they are not LAN service addresses.
+  requests across hosts. Each published service address and port is configurable;
+  default loopback bindings support local proxies and SSH tunnels. External
+  domains and certificates belong to the operator's reverse proxy by default.
 - Use existing Unix sockets only for local services. No custom socket transport
   or message broker is required for the initial integration.
 

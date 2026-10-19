@@ -139,6 +139,8 @@ FAIL_ACCESS=true
 if ductor_apply_access "$DUCTOR_STATE_DIR/config.json" "$TMP"; then printf 'Failed TLS setup was accepted.\n' >&2; exit 1; fi
 [[ $(jq -r .url "$DUCTOR_STATE_DIR/paperclip/connection.json") == http://localhost:3100 ]]
 unset FAIL_ACCESS
+mkdir -p "$DUCTOR_STATE_DIR/services"
+printf 'PAPERCLIP_BIND_ADDRESS=127.0.0.1\n' >"$DUCTOR_STATE_DIR/services/settings.env"
 ductor_apply_access "$DUCTOR_STATE_DIR/config.json" "$TMP"
 [[ $(jq -r .url "$DUCTOR_STATE_DIR/paperclip/connection.json") == https://paperclip.internal ]]
 
@@ -191,3 +193,25 @@ cmp "$TMP/old-memory.yaml" "$DUCTOR_STATE_DIR/services/memory/project/compose.ya
 [[ $(rg -c '^services.up$' "$TMP/calls") == 2 ]]
 [[ -z $(find "$DUCTOR_STATE_DIR" -maxdepth 1 -name '.apply-pins.*' -print -quit) ]]
 printf 'Apply image-pin tests passed: first install and same pins succeed; changed main/memory images preserve installed files and require the upgrade backup gate.\n'
+
+# Reconcile real persisted publication settings, with no Docker or HTTP effects.
+# shellcheck source=/dev/null
+source "$SOURCE"
+fixture networking
+ductor_services_prepare >/dev/null
+jq '.services.publish={paperclip:{bindAddress:"192.0.2.20",port:13100},contextforge:{bindAddress:"::1",port:14444},mempalace:{bindAddress:"127.0.0.1",port:18765},openbao:{bindAddress:"0.0.0.0",port:18200}} | .services.mempalaceUrl="https://memory.internal" | .access={managedTls:false,email:"",trustProxy:true}' "$DUCTOR_STATE_DIR/config.json" >"$TMP/networking.json"
+settings="$DUCTOR_STATE_DIR/services/settings.env"
+secret_hash=$(sha256sum "$DUCTOR_STATE_DIR/services/secrets.env")
+ductor_apply_service_network "$TMP/networking.json" "$settings"
+[[ $(ductor_services_local_origin PAPERCLIP) == http://192.0.2.20:13100 ]]
+[[ $(ductor_services_local_origin CONTEXTFORGE) == 'http://[::1]:14444' ]]
+[[ $(ductor_services_local_origin OPENBAO) == http://127.0.0.1:18200 ]]
+[[ $(ductor_services_value MEMPALACE_ALLOWED_HOSTS "$settings") == mempalace,mempalace:8765,memory.internal ]]
+before=$(sha256sum "$settings")
+ductor_apply_service_network "$TMP/networking.json" "$settings"
+[[ $(sha256sum "$settings") == "$before" ]]
+[[ $(sha256sum "$DUCTOR_STATE_DIR/services/secrets.env") == "$secret_hash" ]]
+jq '.services.publish.openbao.port=13100' "$TMP/networking.json" >"$TMP/conflicting-network.json"
+if ductor_apply_service_network "$TMP/conflicting-network.json" "$settings"; then printf 'Accepted colliding service ports.\n' >&2; exit 1; fi
+[[ $(sha256sum "$settings") == "$before" ]]
+printf 'Service publication tests passed: distinct listeners, public origins, idempotence, secret retention and atomic collision rejection.\n'

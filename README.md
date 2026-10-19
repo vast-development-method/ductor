@@ -9,6 +9,12 @@ configuration together while reusing the upstream applications. The script also
 contains the small JavaScript adapter it generates for Paperclip's native sandbox
 provider interface; there is no separate Ductor runtime package to fetch.
 
+Run that same executable **standalone on a Linux host or in Ductor's own Docker
+container**. The controller image is published to
+`ghcr.io/vast-development-method/ductor`, with version and commit tags. Both modes
+use the same configuration and deploy the shared services as persistent Docker
+containers. See [Docker installation and upgrades](docs/container.md).
+
 The initial release provides deployment and integration commands. It is a pilot
 foundation: the complete service-to-VM execution path still requires testing on
 real infrastructure before entrusting it with unattended production work.
@@ -74,7 +80,7 @@ return task links and results to the conversation. Task cards expose the work
 behind the discussion; approvals and resource limits still apply.
 
 Invite colleagues through **Settings → Members → Invites** after claiming the
-instance and enabling team HTTPS. Each person uses their own Paperclip account
+instance and configuring access through your own HTTPS proxy. Each person uses their own Paperclip account
 and company role. To work from an outside assistant, Paperclip separately offers
 **Connectors → Assistant Connection (MCP)** with explicit human sign-in and consent.
 That connection does not supply the worker agents' model credentials.
@@ -110,8 +116,9 @@ block execution; no alternate memory store or unrestricted tool access is select
 
 ## Shared services
 
-The service stack uses pinned upstream images, named persistent volumes, and
-loopback-only published ports. Defaults are:
+The service stack uses pinned upstream images and named persistent volumes.
+Each service has its own configurable listening address, port, and external URL.
+Ports bind to loopback by default:
 
 | Service | Local endpoint |
 | --- | --- |
@@ -133,21 +140,18 @@ Compose configuration and waits for health checks. `status` also reports whether
 OpenBao is initialized and sealed. A healthy OpenBao process can still be sealed;
 sealed means it cannot supply credentials.
 
-Access services on another machine through SSH forwarding or an authenticated
-TLS reverse proxy. Loopback URLs are not automatically reachable from a worker
-VM or from another server. Ductor does not change your firewall or publish the
-stack on all interfaces by default. The optional managed HTTPS command configures
-Caddy for three distinct DNS names after Paperclip has been claimed and OpenBao
-initialized:
+Use the network settings in setup or the terminal console to select the listening
+addresses and ports. Point your own reverse proxy and certificates at those ports,
+with a separate public domain for each service, and save the external URLs in
+Ductor. Ductor does not install certificates or open ports 80/443 in this default
+flow. An optional managed Caddy mode remains available explicitly; see
+[service access](docs/services.md).
 
-```bash
-sudo ductor services access --paperclip-host office.example.com --gateway-host tools.example.com --bao-host secrets.example.com --email admin@example.com
-```
-
-This opens ports 80/443 for certificate issuance and HTTPS. The names must resolve
-to the control server, with the required network reachability. An existing
-authenticated TLS proxy is also supported; worker bindings need the HTTPS origins
-that the VMs can actually reach.
+Loopback URLs are not reachable from another server or worker VM. If your proxy
+runs elsewhere, bind the required ports to a suitable interface and configure
+your network policy. Worker bindings must use the gateway and OpenBao HTTPS
+origins the VMs can actually reach. Scoped memory instances and service databases
+remain private to the service network.
 
 Initialize OpenBao once, saving its recovery response to a new protected file:
 
@@ -384,6 +388,8 @@ remain separate identities; see [the credential setup](docs/services.md).
 
 ## Operations and recovery
 
+For a standalone installation:
+
 ```bash
 sudo ductor update
 sudo ductor services down
@@ -392,6 +398,10 @@ sudo ductor uninstall
 
 `update` checks shell syntax and the Ductor marker before atomically replacing the
 executable, retaining `ductor.previous`. It does not upgrade running services.
+In Docker mode, replace the controller image using the procedure in
+[container operations](docs/container.md); `ductor update` cannot rewrite the
+running image. The persisted configuration and service volumes survive controller
+replacement in both modes.
 `services upgrade plan` displays current and proposed pinned images. After taking
 and checking full application/database/volume backups,
 `services upgrade apply --backup-confirmed` pulls the pins and reconciles the stack.
@@ -408,8 +418,10 @@ installation.
 
 The default state directory is private to its operator. Use one controller for
 an inventory: mutation commands use a local kernel `flock`, not a distributed
-lock. `DUCTOR_STATE_DIR` and `DUCTOR_INSTALL_DIR` support explicit alternative
-absolute paths for testing or operator-managed installations.
+lock. Standalone mode supports `DUCTOR_STATE_DIR` and `DUCTOR_INSTALL_DIR` overrides
+for explicit alternative absolute paths. The container deployment uses
+`/var/lib/ductor` at the identical path on the host, so the host Docker daemon can
+resolve generated service mounts correctly.
 
 ## Validation and remaining integration work
 

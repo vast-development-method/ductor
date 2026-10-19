@@ -2,8 +2,9 @@
 
 Ductor renders pinned upstream containers and persistent volumes. `services prepare`
 works offline without Docker; `services up` validates and starts the stack. Existing
-credentials are retained. Application ports bind to `127.0.0.1`, and databases are
-not published. Production OpenBao uses durable PebbleDB storage; it starts sealed.
+credentials are retained. Application ports default to `127.0.0.1`; each service's
+bind address and published port are adjustable. Databases are not published.
+Production OpenBao uses durable PebbleDB storage; it starts sealed.
 
 ```bash
 sudo ductor services prepare
@@ -14,7 +15,12 @@ sudo ductor services urls
 
 ## First owner and recovery material
 
-Before opening network access, forward the Paperclip port from your workstation:
+With an external proxy, configure its route and certificate for the declared
+Paperclip origin before onboarding. A new installation uses that origin from its
+first account claim. Existing installations retain their canonical origin until
+the new endpoint and operator access have been verified.
+
+When using the private loopback defaults, forward the Paperclip port from your workstation:
 
 ```bash
 ssh -L 3100:127.0.0.1:3100 operator@control-server
@@ -43,7 +49,55 @@ preparation. Its random password is in the root-only `services/secrets.env`. Con
 an actual operator email during setup. Changing that environment value after the
 ContextForge database has been initialized is not an account-renaming operation.
 
-## Managed team HTTPS
+## Your reverse proxy and service ports
+
+The standard setup leaves domains, certificates and the reverse proxy under your
+control. In the terminal menu, choose **Connections → Service networking**. Select
+the published IPv4 or IPv6 address and port for each application, enter its public
+origin, save, and apply. The same settings are available in `config.json`:
+
+```json
+{
+  "services": {
+    "paperclipUrl": "https://work.example.com",
+    "gatewayOrigin": "https://tools.example.com",
+    "openbaoUrl": "https://keys.example.com",
+    "mempalaceUrl": "https://memory.example.com",
+    "publish": {
+      "paperclip": {"bindAddress": "127.0.0.1", "port": 3100},
+      "contextforge": {"bindAddress": "127.0.0.1", "port": 4444},
+      "openbao": {"bindAddress": "127.0.0.1", "port": 8200},
+      "mempalace": {"bindAddress": "127.0.0.1", "port": 8765}
+    }
+  },
+  "access": {"managedTls": false, "email": "", "trustProxy": true}
+}
+```
+
+This is the service/access portion of the generated configuration. Use your actual
+domains. A proxy on another machine needs the controller's reachable interface
+address in place of loopback. `0.0.0.0` and `::` bind all interfaces for that address
+family. Ports must be distinct and in the range 1024–65535. Ductor's local control
+requests use the selected interface; wildcard bindings use the matching loopback
+address. Existing configurations without `publish` retain their saved bindings.
+
+Map each domain to its HTTP backend port and forward the original `Host` and scheme.
+Set `trustProxy` only for exactly one trusted Paperclip reverse proxy that replaces
+forwarded headers, with direct backend access restricted to that proxy. Authentication
+remains enabled. The public HTTPS origins configure canonical URLs and secure browser
+cookies; Ductor does not request certificates or open ports 80/443 in this mode.
+An existing managed Caddy instance is stopped when applying `managedTls: false`.
+
+The optional MemPalace origin exposes the base token-authenticated service. Agent
+and project memory scopes retain separate private containers and remain accessible
+through ContextForge only. Scoped memory and PostgreSQL are not given host ports.
+Published addresses, credentials, and all named data volumes survive upgrades.
+
+When Ductor itself runs in Docker, use the controller container's `ductor` CLI for
+these operations. Its host networking and persistent state mounts preserve the
+same service URLs and Compose bind mounts as the standalone installation.
+
+## Optional managed team HTTPS
 
 Prepare three DNS names pointing to the control server. The names must be reachable
 for ACME validation on TCP ports 80/443; route firewall/NAT traffic accordingly.
@@ -63,7 +117,7 @@ sudo ductor services access-check
 Replace the example names and email with your own. This explicit command enables a
 pinned Caddy reverse proxy on ports 80/443, configures Paperclip's canonical origin
 and allowed hostname, trusts exactly the one managed proxy hop, and enables secure ContextForge cookies and matching browser
-origins. MemPalace and the databases remain unpublished. The Caddy admin endpoint
+origins. MemPalace is not routed by Caddy and the databases remain unpublished. The Caddy admin endpoint
 is not published. Caddy certificate/account state persists in dedicated volumes.
 
 The command refuses to expose an unclaimed Paperclip or an uninitialized OpenBao.
@@ -76,7 +130,8 @@ directory in service state. It does not replace an existing operator-managed pro
 
 Once HTTPS is enabled, use the HTTPS ContextForge admin URL: its secure browser
 cookies intentionally do not work over a plain HTTP SSH-forwarded URL. Trusted
-local controller API calls still use explicit bearer credentials on loopback.
+local controller API calls still use explicit bearer credentials on the configured
+host-side listener.
 
 ## Service credentials and SSH transport
 

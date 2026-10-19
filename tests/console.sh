@@ -94,6 +94,22 @@ jq '.access={managedTls:true,email:"operator@vdm.dev"}' "$work/fleet" >"$work/ma
 ductor_config_validate "$work/managed-access"
 jq '.access.email=""' "$work/managed-access" >"$work/bad-access"
 expect_failure ductor_config_validate "$work/bad-access"
+jq '.services.publish={paperclip:{bindAddress:"192.0.2.10",port:13100},contextforge:{bindAddress:"::",port:14444}} | .access.trustProxy=true' "$work/fleet" >"$work/network"
+ductor_config_validate "$work/network"
+jq '.services.publish.paperclip.bindAddress="1::2::3"' "$work/network" >"$work/bad-network"
+expect_failure ductor_config_validate "$work/bad-network"
+jq '.services.publish.contextforge.port=13100' "$work/network" >"$work/duplicate-ports"
+expect_failure ductor_config_validate "$work/duplicate-ports"
+jq '.access.trustProxy="true"' "$work/network" >"$work/bad-proxy"
+expect_failure ductor_config_validate "$work/bad-proxy"
+(
+    cp "$work/network" "$work/network-form"
+    ductor_ui_input() { case $2 in 'Optional MemPalace'*) printf 'https://memory.vdm.dev\n' ;; *) printf '%s\n' "$3" ;; esac; }
+    ductor_ui_budget() { printf '%s\n' "$2"; }
+    ductor_ui_confirm() { [[ $1 == 'Trusted reverse proxy' ]]; }
+    ductor_console_network_form "$work/network-form"
+    jq -e '.services.publish.paperclip=={bindAddress:"192.0.2.10",port:13100} and .services.publish.contextforge=={bindAddress:"::",port:14444} and .services.publish.mempalace.port==8765 and .services.publish.openbao.port==8200 and .services.mempalaceUrl=="https://memory.vdm.dev" and .access.managedTls==false and .access.trustProxy==true' "$work/network-form" >/dev/null
+)
 
 # A fresh child must keep errexit even when the caller is an if condition.
 cat >"$work/child" <<'CHILD'

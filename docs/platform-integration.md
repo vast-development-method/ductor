@@ -148,6 +148,12 @@ configured Incus remote and provide an explicit image remote as well. Bare image
 names use the Incus client's default image source, which might differ from the
 selected execution host.
 
+In [Docker controller mode](container.md), configure those remotes using the
+container's Incus client. Its client configuration and certificates persist under
+`/var/lib/ductor/incus`. The host's client configuration and local Incus socket are
+not inherited automatically. Authenticated network remotes support both LAN and
+external hosts; an explicit socket mount is needed for local Unix-socket access.
+
 This preparation preserves existing instances and the original platform project.
 Do not run `launch-vm.sh` separately for a VM already owned by Ductor: that
 launcher has its own creation/cleanup lifecycle and does not create Ductor's

@@ -59,7 +59,7 @@ qualification.
 
 ## Invite colleagues
 
-After the owner has claimed Paperclip and team HTTPS is working, use
+After the owner has claimed Paperclip and access through your HTTPS proxy is working, use
 **Settings → Members → Invites** in the intended company. Choose the person's role,
 create the invitation, and share its single-use link through your normal channel.
 The recipient signs in with their own Paperclip account. The pinned implementation
