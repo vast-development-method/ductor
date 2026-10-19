@@ -141,4 +141,4 @@ jq --arg id "$fixture_agent" '.+{id:$id}' "$TEST_DIR/api/agent" > "$TEST_DIR/reg
 ductor_agent_registry_check "$TEST_DIR/registered-live" "$TEST_DIR/profile"
 jq '.reportsTo="77777777-7777-4777-8777-777777777777"' "$TEST_DIR/registered-live" > "$TEST_DIR/drifted-agent"
 expect_failure ductor_agent_registry_check "$TEST_DIR/drifted-agent" "$TEST_DIR/profile"
-printf 'Profile policy and trusted agent registry tests passed.\n' 
+printf 'Profile policy and trusted agent registry tests passed.\n'
