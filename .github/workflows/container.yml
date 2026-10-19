@@ -1,0 +1,117 @@
+name: Ductor container
+
+on:
+  pull_request:
+  push:
+    branches: [main, 'feature/**']
+    tags: ['v[0-9]*.[0-9]*.[0-9]*']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: container-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+
+jobs:
+  checks:
+    name: Validate standalone runtime before image publication
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Install test dependencies
+        run: sudo apt-get update && sudo apt-get install -y shellcheck jq openssl openssh-client ripgrep
+      - name: Run complete offline suite
+        run: sudo env "PATH=$PATH" bash tests/run.sh
+  image:
+    name: Build and exercise ${{ matrix.arch }} image
+    needs: checks
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+      packages: write
+    env:
+      IMAGE: ghcr.io/vast-development-method/ductor
+    outputs:
+      version: ${{ steps.release.outputs.version }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Validate release identity
+        id: release
+        env:
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          version=$(bash src/ductor version)
+          version=${version#Ductor }
+          [[ $version =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z]+([.-][0-9A-Za-z]+)*)?$ ]]
+          if [[ $REF_TYPE == tag ]]; then
+            [[ $REF_NAME == "v$version" ]] || { echo 'Tag must match the version embedded in src/ductor.' >&2; exit 1; }
+          elif [[ $REF_NAME == feature/ductor-bootstrap ]]; then
+            [[ $version == *-* ]] || { echo 'Bootstrap branch publication requires a prerelease version.' >&2; exit 1; }
+          fi
+          printf 'version=%s\n' "$version" >> "$GITHUB_OUTPUT"
+      - name: Build native image
+        env:
+          VERSION: ${{ steps.release.outputs.version }}
+          REVISION: ${{ github.sha }}
+        run: |
+          docker build --pull --build-arg "DUCTOR_VERSION=$VERSION" \
+            --build-arg "VCS_REF=$REVISION" --build-arg "BUILD_DATE=$(date -u +%FT%TZ)" \
+            --tag ductor:ci .
+      - name: Exercise real container lifecycle
+        run: bash tests/container-image.sh ductor:ci
+      - name: Publish tested architecture
+        if: github.repository == 'vast-development-method/ductor' && github.event_name == 'push' && (github.ref_type == 'tag' || github.ref == 'refs/heads/feature/ductor-bootstrap')
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GHCR_USER: ${{ github.actor }}
+          ARCH: ${{ matrix.arch }}
+          REVISION: ${{ github.sha }}
+        run: |
+          printf '%s' "$GHCR_TOKEN" | docker login ghcr.io --username "$GHCR_USER" --password-stdin
+          trap 'docker logout ghcr.io' EXIT
+          docker tag ductor:ci "$IMAGE:sha-$REVISION-$ARCH"
+          docker push "$IMAGE:sha-$REVISION-$ARCH"
+
+  publish:
+    name: Publish versioned multi-architecture image
+    needs: image
+    if: github.repository == 'vast-development-method/ductor' && github.event_name == 'push' && (github.ref_type == 'tag' || github.ref == 'refs/heads/feature/ductor-bootstrap')
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+    env:
+      IMAGE: ghcr.io/vast-development-method/ductor
+      VERSION: ${{ needs.image.outputs.version }}
+      REVISION: ${{ github.sha }}
+    steps:
+      - name: Publish manifest only after both architecture tests pass
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GHCR_USER: ${{ github.actor }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          version=$VERSION
+          [[ $version =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z]+([.-][0-9A-Za-z]+)*)?$ ]]
+          printf '%s' "$GHCR_TOKEN" | docker login ghcr.io --username "$GHCR_USER" --password-stdin
+          trap 'docker logout ghcr.io' EXIT
+          tags=(--tag "$IMAGE:$version" --tag "$IMAGE:sha-$REVISION")
+          if [[ $version != *-* ]]; then
+            tags+=(--tag "$IMAGE:latest" --tag "$IMAGE:${version%.*}")
+          fi
+          docker buildx imagetools create "${tags[@]}" "$IMAGE:sha-$REVISION-amd64" "$IMAGE:sha-$REVISION-arm64"
+          docker buildx imagetools inspect "$IMAGE:$version"
+          printf 'Published `%s:%s` for Linux amd64 and arm64.\n' "$IMAGE" "$version" >> "$GITHUB_STEP_SUMMARY"

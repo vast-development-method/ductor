@@ -7,7 +7,7 @@ set +x
 set -Eeuo pipefail
 umask 077
 
-DUCTOR_VERSION='0.1.0'
+DUCTOR_VERSION='0.1.0-rc.1'
 DUCTOR_SOURCE_URL='https://raw.githubusercontent.com/vast-development-method/ductor/main/src/ductor'
 : "${DUCTOR_STATE_DIR:=/var/lib/ductor}"
 : "${DUCTOR_INSTALL_DIR:=/usr/local/bin}"
@@ -22,6 +22,15 @@ ductor_error() {
 }
 ductor_log() { printf 'Ductor: %s\n' "$*" >&2; }
 ductor_die() { ductor_log "$*"; exit 1; }
+ductor_is_container() { [[ ${DUCTOR_CONTAINER:-0} == 1 || -f /etc/ductor-container ]]; }
+if ductor_is_container; then
+    # sudo intentionally resets the calling environment. Keep the Incus client
+    # identity in persistent state for both operator and forced broker commands.
+    export INCUS_CONF=${INCUS_CONF:-$DUCTOR_STATE_DIR/incus}
+fi
+ductor_host_install_only() {
+    ! ductor_is_container || ductor_die 'This Ductor executable belongs to its versioned container image. Pull the selected image version and recreate the controller container; do not install packages or replace the executable inside it.'
+}
 ductor_require_cmd() {
     local name
     for name in "$@"; do command -v "$name" >/dev/null 2>&1 || ductor_die "Missing dependency: $name. Run ductor dependencies."; done
@@ -94,6 +103,9 @@ Usage: ductor COMMAND [ARGUMENTS]
   provider ...              Install Paperclip native Incus lifecycle integration
   update                    Validate and atomically replace this script
   uninstall                 Remove this script; retain services and all data
+  serve                     Run the container SSH broker and lease supervisor
+  container-health          Check the running container supervisor and SSH key
+  container-status          Show the container broker address and host key
   version|help              Show version or this help
 
 Run 'ductor nodes help', 'ductor vm help', 'ductor paperclip help', or
@@ -102,11 +114,13 @@ Run 'ductor nodes help', 'ductor vm help', 'ductor paperclip help', or
 State: /var/lib/ductor (override DUCTOR_STATE_DIR explicitly)
 Install: /usr/local/bin/ductor (override DUCTOR_INSTALL_DIR explicitly)
 Linux, Bash 4.4+, Docker Engine with Compose v2. Incus is managed separately.
-Services use loopback ports. Use SSH forwarding or your authenticated TLS proxy.
+Service addresses and ports are configurable; defaults use loopback.
+Supply your own TLS proxy.
 HELP
 }
 
 ductor_dependencies() {
+    ductor_host_install_only
     local tools_only=false
     while [[ $# -gt 0 ]]; do
         case $1 in --yes) DUCTOR_ASSUME_YES=true ;; --tools-only) tools_only=true ;; *) ductor_die 'Usage: ductor dependencies [--yes] [--tools-only]' ;; esac
@@ -138,6 +152,7 @@ ductor_dependencies() {
 }
 
 ductor_install() {
+    ductor_host_install_only
     local setup=true temporary target source_url=$DUCTOR_SOURCE_URL
     while [[ $# -gt 0 ]]; do
         case $1 in
@@ -173,6 +188,7 @@ ductor_install() {
 }
 
 ductor_update() {
+    ductor_host_install_only
     local temporary target=$DUCTOR_INSTALL_DIR/ductor
     ductor_require_cmd curl
     [[ -f $target && ! -L $target ]] || ductor_die 'Install Ductor before updating it.'
@@ -192,6 +208,7 @@ ductor_update() {
 }
 
 ductor_uninstall() {
+    ductor_host_install_only
     local target=$DUCTOR_INSTALL_DIR/ductor
     [[ -f $target && ! -L $target ]] || ductor_die 'No installed Ductor executable found.'
     ductor_confirm 'Remove the Ductor executable? Services, VMs, configuration and credentials will remain.' || return 0
@@ -216,6 +233,9 @@ ductor_doctor() {
         printf 'MISSING  Docker Engine (service host)\n'; failed=1
     fi
     if command -v incus >/dev/null 2>&1; then printf 'OK       Incus client\n'; else printf 'OPTIONAL Incus client (needed on the fleet controller)\n'; fi
+    if ductor_is_container; then
+        if ductor_container_health; then printf 'OK       Container SSH broker and lease supervisor\n'; else printf 'WAITING  Container SSH broker or lease supervisor\n'; failed=1; fi
+    fi
     if [[ $role == worker ]]; then
         printf 'INFO     Worker role: shared services run on the controller\n'
     elif [[ -f $DUCTOR_STATE_DIR/services/compose.yaml ]]; then
@@ -289,8 +309,8 @@ ductor_menu() {
         esac
     done
 }
-# Embedded control services. Application ports are loopback-only. The optional
-# team-access profile publishes HTTPS only after an explicit access command.
+# Embedded control services. Published addresses default to loopback and can be
+# configured per service. TLS normally belongs to the operator's reverse proxy.
 # These services are independent upstream applications. Starting them does not
 # implicitly grant agents cross-project memory or credential access.
 
@@ -307,11 +327,53 @@ ductor_services_port() {
     [[ $1 =~ ^[0-9]{1,5}$ ]] && ((10#$1 >= 1024 && 10#$1 <= 65535))
 }
 
+# Literal addresses only: never interpolate DNS names, shell text or IPv6 zones
+# into Compose. Compressed IPv6 is supported without IPv4-mapped notation.
+ductor_services_bind_address() {
+    local value=$1 part remainder groups=0
+    local -a octets=()
+    if [[ $value =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+        IFS=. read -r -a octets <<<"$value"
+        for part in "${octets[@]}"; do
+            [[ $part =~ ^(0|[1-9][0-9]{0,2})$ ]] && ((10#$part<=255)) || return 1
+        done
+        return 0
+    fi
+    [[ $value == *:* && $value =~ ^[A-Fa-f0-9:]+$ && $value != *:::* ]] || return 1
+    [[ $value != :* || $value == ::* ]] && [[ $value != *: || $value == *:: ]] || return 1
+    remainder=$value
+    if [[ $value == *::* ]]; then
+        remainder=${value/::/:}
+        [[ $remainder != *::* ]] || return 1
+    else
+        [[ $value != :* && $value != *: ]] || return 1
+    fi
+    IFS=: read -r -a octets <<<"$remainder"
+    for part in "${octets[@]}"; do
+        [[ -n $part ]] || continue
+        [[ $part =~ ^[A-Fa-f0-9]{1,4}$ ]] || return 1
+        groups=$((groups+1))
+    done
+    if [[ $value == *::* ]]; then ((groups<8)); else ((groups==8)); fi
+}
+
+ductor_services_local_origin() {
+    local service=$1 settings=${2:-$DUCTOR_STATE_DIR/services/settings.env} address port
+    [[ $service == PAPERCLIP || $service == CONTEXTFORGE || $service == MEMPALACE || $service == OPENBAO ]] || return 1
+    port=$(ductor_services_value "${service}_PORT" "$settings") || return 1
+    address=$(ductor_services_value "${service}_BIND_ADDRESS" "$settings") || return 1
+    address=${address:-127.0.0.1}
+    ductor_services_port "$port" && ductor_services_bind_address "$address" || return 1
+    case $address in 0.0.0.0) address=127.0.0.1 ;; ::) address=::1 ;; esac
+    [[ $address != *:* ]] || address="[$address]"
+    printf 'http://%s:%s\n' "$address" "$port"
+}
+
 ductor_services_prepare() (
     set -euo pipefail
     umask 077
     ductor_require_cmd openssl
-    local dir settings secrets temporary key value port other
+    local dir settings secrets temporary key value port other address
     local paperclip_port=${DUCTOR_PAPERCLIP_PORT:-3100}
     local forge_port=${DUCTOR_CONTEXTFORGE_PORT:-4444}
     local memory_port=${DUCTOR_MEMPALACE_PORT:-8765}
@@ -348,6 +410,19 @@ ductor_services_prepare() (
         } > "$temporary" || return
         mv -- "$temporary" "$settings" || return
     fi
+    # Backfill old releases without resetting operator-selected network settings.
+    for key in PAPERCLIP CONTEXTFORGE MEMPALACE OPENBAO; do
+        address=$(ductor_services_value "${key}_BIND_ADDRESS" "$settings") || return
+        if [[ -z $address ]]; then
+            address=127.0.0.1
+            ductor_services_setting_set "${key}_BIND_ADDRESS" "$address" "$settings" || return
+        fi
+        ductor_services_bind_address "$address" || ductor_die "Invalid $key published bind address. Use an IPv4 or IPv6 literal."
+        port=$(ductor_services_value "${key}_PORT" "$settings") || return
+        ductor_services_port "$port" || ductor_die "Invalid $key published port."
+    done
+    value=$(ductor_services_local_origin CONTEXTFORGE "$settings") || return
+    ductor_services_setting_set CONTEXTFORGE_LOCAL_URL "$value" "$settings" || return
     if [[ ! -e $secrets ]]; then
         # Losing this file while volumes remain is a restore operation: changing
         # passwords or encryption keys would make existing data inaccessible.
@@ -398,8 +473,8 @@ x-forge-environment: &forge-environment
   ENVIRONMENT: production
   SECURE_COOKIES: ${CONTEXTFORGE_SECURE_COOKIES:-false}
   CSRF_COOKIE_SECURE: ${CONTEXTFORGE_SECURE_COOKIES:-false}
-  CSRF_TRUSTED_ORIGINS: '["${CONTEXTFORGE_PUBLIC_URL:-http://localhost:4444}","http://localhost:${CONTEXTFORGE_PORT}","http://127.0.0.1:${CONTEXTFORGE_PORT}"]'
-  ALLOWED_ORIGINS: '["${CONTEXTFORGE_PUBLIC_URL:-http://localhost:4444}","http://localhost:${CONTEXTFORGE_PORT}","http://127.0.0.1:${CONTEXTFORGE_PORT}"]'
+  CSRF_TRUSTED_ORIGINS: '["${CONTEXTFORGE_PUBLIC_URL:-http://localhost:4444}","http://localhost:${CONTEXTFORGE_PORT}","http://127.0.0.1:${CONTEXTFORGE_PORT}","${CONTEXTFORGE_LOCAL_URL:-http://127.0.0.1:4444}"]'
+  ALLOWED_ORIGINS: '["${CONTEXTFORGE_PUBLIC_URL:-http://localhost:4444}","http://localhost:${CONTEXTFORGE_PORT}","http://127.0.0.1:${CONTEXTFORGE_PORT}","${CONTEXTFORGE_LOCAL_URL:-http://127.0.0.1:4444}"]'
   APP_DOMAIN: ${CONTEXTFORGE_PUBLIC_URL:-http://localhost:4444}
 services:
   caddy:
@@ -463,7 +538,9 @@ services:
       TRUST_PROXY: ${PAPERCLIP_TRUST_PROXY:-false}
       BETTER_AUTH_SECRET: ${BETTER_AUTH_SECRET:?missing secret}
     ports:
-      - "127.0.0.1:${PAPERCLIP_PORT}:3100"
+      - target: 3100
+        published: "${PAPERCLIP_PORT}"
+        host_ip: "${PAPERCLIP_BIND_ADDRESS:-127.0.0.1}"
     volumes:
       - paperclip:/paperclip
       - paperclip-ssh:/paperclip/.ssh:ro
@@ -528,10 +605,12 @@ services:
       MEMPALACE_MCP_HTTP_TOKEN: ${MEMPALACE_MCP_HTTP_TOKEN:?missing secret}
       MEMPALACE_PALACE_PATH: /data/.mempalace/palace
       MEMPALACE_EMBEDDING_DEVICE: cpu
-      MEMPALACE_MCP_EXTRA_ALLOWED_HOSTS: mempalace,mempalace:8765
+      MEMPALACE_MCP_EXTRA_ALLOWED_HOSTS: ${MEMPALACE_ALLOWED_HOSTS:-mempalace,mempalace:8765}
     networks: [memory]
     ports:
-      - "127.0.0.1:${MEMPALACE_PORT}:8765"
+      - target: 8765
+        published: "${MEMPALACE_PORT}"
+        host_ip: "${MEMPALACE_BIND_ADDRESS:-127.0.0.1}"
     volumes:
       - mempalace:/data
     healthcheck:
@@ -581,7 +660,9 @@ services:
       MCPGATEWAY_ADMIN_API_ENABLED: "true"
     networks: [default, memory]
     ports:
-      - "127.0.0.1:${CONTEXTFORGE_PORT}:4444"
+      - target: 4444
+        published: "${CONTEXTFORGE_PORT}"
+        host_ip: "${CONTEXTFORGE_BIND_ADDRESS:-127.0.0.1}"
     depends_on:
       contextforge-migrate:
         condition: service_completed_successfully
@@ -601,7 +682,9 @@ services:
       BAO_ADDR: http://127.0.0.1:8200
       SKIP_CHOWN: "true"
     ports:
-      - "127.0.0.1:${OPENBAO_PORT}:8200"
+      - target: 8200
+        published: "${OPENBAO_PORT}"
+        host_ip: "${OPENBAO_BIND_ADDRESS:-127.0.0.1}"
     volumes:
       - openbao:/openbao/file
       - ./openbao.hcl:/openbao/config/ductor.hcl:ro
@@ -688,16 +771,16 @@ ductor_services_down() {
 }
 
 ductor_services_urls() {
-    local dir port name label
+    local dir origin name label
     dir=$(ductor_services_dir) || return
     [[ -s $dir/settings.env ]] || ductor_die "Control services are not configured."
     printf '%-16s %s\n' 'SERVICE' 'LOCAL URL'
     while IFS='|' read -r name label; do
-        port=$(ductor_services_value "$name" "$dir/settings.env") || return
+        origin=$(ductor_services_local_origin "${name%_PORT}" "$dir/settings.env") || return
         case $name in
-            MEMPALACE_PORT) printf '%-16s http://127.0.0.1:%s/mcp\n' "$label" "$port" ;;
-            CONTEXTFORGE_PORT) printf '%-16s http://127.0.0.1:%s/admin\n' "$label" "$port" ;;
-            *) printf '%-16s http://127.0.0.1:%s\n' "$label" "$port" ;;
+            MEMPALACE_PORT) printf '%-16s %s/mcp\n' "$label" "$origin" ;;
+            CONTEXTFORGE_PORT) printf '%-16s %s/admin\n' "$label" "$origin" ;;
+            *) printf '%-16s %s\n' "$label" "$origin" ;;
         esac
     done <<'ENDPOINTS'
 PAPERCLIP_PORT|Paperclip
@@ -713,20 +796,20 @@ ENDPOINTS
         printf 'Team OpenBao: %s/ui\n' "$(ductor_services_value OPENBAO_PUBLIC_URL "$dir/settings.env")"
         printf 'HTTPS endpoints are configured; ductor services access-check verifies availability.\n'
     else
-        printf 'Remote access: forward loopback ports with SSH, or run ductor services access for managed HTTPS.\n'
+        printf 'TLS is managed by your reverse proxy. Adjust published addresses/ports in Connections > Service networking.\n'
     fi
 }
 
 ductor_services_status() {
-    local dir port body result=0
+    local dir origin body result=0
     dir=$(ductor_services_dir) || return
     ductor_services_compose ps --all || result=1
     if command -v docker >/dev/null; then
         ductor_services_memory_all status || result=1
     fi
     if command -v curl >/dev/null && command -v jq >/dev/null && [[ -f $dir/settings.env ]]; then
-        port=$(ductor_services_value OPENBAO_PORT "$dir/settings.env") || return
-        if body=$(curl -q --silent --show-error --fail --connect-timeout 3 --max-time 5 "http://127.0.0.1:$port/v1/sys/seal-status" 2>/dev/null); then
+        origin=$(ductor_services_local_origin OPENBAO "$dir/settings.env") || return
+        if body=$(curl -q --silent --show-error --fail --connect-timeout 3 --max-time 5 "$origin/v1/sys/seal-status" 2>/dev/null); then
             printf '%s\n' "$body" | jq -r '"OpenBao: initialized=\(.initialized), sealed=\(.sealed), unseal progress=\(.progress)/\(.t)"' || result=1
         else
             ductor_log "OpenBao seal state unavailable."
@@ -741,21 +824,21 @@ ductor_services_bao_init() (
     umask 077
     ductor_require_cmd curl
     ductor_require_cmd jq
-    local dir port output=${1:-} parent status
+    local dir origin output=${1:-} parent status
     [[ $output = /* && ! -e $output && ! -L $output ]] || ductor_die "Supply a new absolute path for the recovery JSON: ductor services bao-init /secure/path/openbao-recovery.json"
     parent=${output%/*}
     [[ -d $parent && ! -L $parent && -w $parent ]] || ductor_die "Recovery parent directory must exist and be writable."
     dir=$(ductor_services_dir) || return
     [[ -s $dir/settings.env ]] || ductor_die "Control services are not configured."
-    port=$(ductor_services_value OPENBAO_PORT "$dir/settings.env") || return
-    status=$(curl -q --silent --show-error --fail --max-time 10 "http://127.0.0.1:$port/v1/sys/init") || return
+    origin=$(ductor_services_local_origin OPENBAO "$dir/settings.env") || return
+    status=$(curl -q --silent --show-error --fail --max-time 10 "$origin/v1/sys/init") || return
     [[ $(printf '%s' "$status" | jq -r .initialized) = false ]] || ductor_die "OpenBao is already initialized; use its existing recovery keys."
     # Exclusive creation before initializing prevents overwriting recovery data.
     (set -o noclobber; : > "$output") || ductor_die "Recovery file already exists."
     chmod 0600 "$output" || return
     if ! curl -q --silent --show-error --fail --max-time 60 \
         -H 'Content-Type: application/json' --data-binary '{"secret_shares":5,"secret_threshold":3}' \
-        "http://127.0.0.1:$port/v1/sys/init" --output "$output"; then
+        "$origin/v1/sys/init" --output "$output"; then
         ductor_log "Initialization response was not confirmed. Keep $output and check OpenBao status before any retry."
         return 1
     fi
@@ -772,10 +855,10 @@ ductor_services_bao_unseal() (
     set +x
     ductor_require_cmd curl
     ductor_require_cmd jq
-    local dir port key response
+    local dir origin key response
     dir=$(ductor_services_dir) || return
     [[ -s $dir/settings.env ]] || ductor_die "Control services are not configured."
-    port=$(ductor_services_value OPENBAO_PORT "$dir/settings.env") || return
+    origin=$(ductor_services_local_origin OPENBAO "$dir/settings.env") || return
     if ! { printf 'OpenBao unseal share (hidden): ' > /dev/tty; IFS= read -r -s key < /dev/tty; }; then
         ductor_die "Unsealing requires an interactive terminal."
     fi
@@ -783,7 +866,7 @@ ductor_services_bao_unseal() (
     [[ -n $key ]] || ductor_die "No unseal share supplied."
     # Pass the share on stdin, never in arguments, environment, or logs.
     response=$(printf '%s' "$key" | jq -Rs '{key: .}' | curl -q --silent --show-error --fail --max-time 30 \
-        -H 'Content-Type: application/json' --data-binary @- "http://127.0.0.1:$port/v1/sys/unseal") || return
+        -H 'Content-Type: application/json' --data-binary @- "$origin/v1/sys/unseal") || return
     unset key
     printf '%s\n' "$response" | jq -r '"OpenBao: sealed=\(.sealed), unseal progress=\(.progress)/\(.t)"'
 )
@@ -914,7 +997,7 @@ ductor_services_memory_allow_network() (
 ductor_services_bao_request() (
     set +x
     umask 077
-    local method=$1 path=$2 token_file=$3 payload=$4 output=$5 work port status token
+    local method=$1 path=$2 token_file=$3 payload=$4 output=$5 work origin status token
     ductor_require_cmd curl jq
     [[ $method == GET || $method == POST || $method == PUT ]] || ductor_die 'Invalid credential API method.'
     [[ $path =~ ^/v1/[A-Za-z0-9_/-]+$ ]] || ductor_die 'Invalid credential API path.'
@@ -925,10 +1008,10 @@ ductor_services_bao_request() (
     trap 'rm -rf -- "$work"' EXIT
     printf 'X-Vault-Token: %s\nContent-Type: application/json\n' "$token" > "$work/headers" || return
     unset token
-    port=$(ductor_services_value OPENBAO_PORT "$(ductor_services_dir)/settings.env") || return
+    origin=$(ductor_services_local_origin OPENBAO) || return
     local -a arguments=(--silent --show-error --connect-timeout 5 --max-time 45 --max-filesize 1048576 --request "$method" --header "@$work/headers" --output "$output" --write-out '%{http_code}')
     [[ -z $payload ]] || arguments+=(--data-binary "@$payload")
-    status=$(curl -q "${arguments[@]}" "http://127.0.0.1:$port$path") || return
+    status=$(curl -q "${arguments[@]}" "$origin$path") || return
     case $status in
         2??) return 0 ;;
         404) return 4 ;;
@@ -1238,7 +1321,7 @@ ductor_services_access_check() (
 ductor_services_access() (
     set -euo pipefail
     umask 077
-    local paperclip='' gateway='' bao='' email='' dir port body host attempt backup
+    local paperclip='' gateway='' bao='' email='' dir origin body host attempt backup
     while (($#)); do
         (($# >= 2)) || ductor_die 'Each access option requires a value.'
         case $1 in
@@ -1260,11 +1343,11 @@ ductor_services_access() (
     [[ -s $dir/settings.env ]] || ductor_die 'Start control services first.'
     # An unclaimed Paperclip or uninitialized Bao must never be exposed to the
     # network: their unauthenticated first-owner operations would be claimable.
-    port=$(ductor_services_value PAPERCLIP_PORT "$dir/settings.env") || return
-    body=$(curl -q --silent --show-error --fail --connect-timeout 3 --max-time 10 "http://127.0.0.1:$port/api/health") || return
+    origin=$(ductor_services_local_origin PAPERCLIP "$dir/settings.env") || return
+    body=$(curl -q --silent --show-error --fail --connect-timeout 3 --max-time 10 "$origin/api/health") || return
     printf '%s' "$body" | jq -e '.status == "ok" and .deploymentMode == "authenticated" and .bootstrapStatus == "ready"' >/dev/null || ductor_die 'Claim Paperclip as its owner through an SSH tunnel before enabling team HTTPS.'
-    port=$(ductor_services_value OPENBAO_PORT "$dir/settings.env") || return
-    body=$(curl -q --silent --show-error --fail --connect-timeout 3 --max-time 10 "http://127.0.0.1:$port/v1/sys/seal-status") || return
+    origin=$(ductor_services_local_origin OPENBAO "$dir/settings.env") || return
+    body=$(curl -q --silent --show-error --fail --connect-timeout 3 --max-time 10 "$origin/v1/sys/seal-status") || return
     printf '%s' "$body" | jq -e '.initialized == true' >/dev/null || ductor_die 'Initialize OpenBao and securely store its recovery material before enabling team HTTPS.'
     backup=$(mktemp -d "$dir/.access-backup.XXXXXX") || return
     cp -p -- "$dir/settings.env" "$backup/settings.env" || return
@@ -2025,8 +2108,8 @@ ductor_bindings_provision() (
     trap 'rm -rf -- "$work"' EXIT
     settings=$DUCTOR_STATE_DIR/services/settings.env
     [[ -s $settings ]] || ductor_die 'Prepare and start the shared services before creating bindings.'
-    forge=http://127.0.0.1:$(ductor_services_value CONTEXTFORGE_PORT "$settings")
-    bao=http://127.0.0.1:$(ductor_services_value OPENBAO_PORT "$settings")
+    forge=$(ductor_services_local_origin CONTEXTFORGE "$settings") || return
+    bao=$(ductor_services_local_origin OPENBAO "$settings") || return
     admin_file=$(jq -r .openbaoAdminTokenFile "$request") || return
     public_forge=$(jq -r '.gatewayOrigin | rtrimstr("/")' "$request") || return
     public_bao=$(jq -r '.openbaoUrl | rtrimstr("/")' "$request") || return
@@ -3947,9 +4030,11 @@ ductor_broker_stop() {
 ductor_broker_install() {
     local key=${1:-} directory=/var/lib/ductor-broker file temporary
     [[ $EUID == 0 && -f $key && ! -L $key ]] || ductor_die 'Usage: sudo ductor broker install PUBLIC_KEY_FILE'
-    ductor_require_cmd ssh-keygen useradd visudo systemctl
+    ductor_require_cmd ssh-keygen
     ssh-keygen -lf "$key" >/dev/null || ductor_die 'Invalid broker public key.'
     [[ $(wc -l < "$key") -le 1 && $(cat "$key") =~ ^ssh-ed25519\ [A-Za-z0-9+/=]+(\ [A-Za-z0-9._-]+)?$ ]] || ductor_die 'Use the dedicated Ductor ed25519 public key.'
+    if ductor_is_container; then ductor_container_broker_install "$key"; return; fi
+    ductor_require_cmd useradd visudo systemctl
     [[ $DUCTOR_STATE_DIR == /var/lib/ductor && $DUCTOR_INSTALL_DIR == /usr/local/bin ]] || ductor_die 'Managed broker installation requires the standard system paths.'
     if ! id ductor-broker >/dev/null 2>&1; then useradd --system --home-dir "$directory" --shell /bin/sh ductor-broker; fi
     [[ ! -L $directory && ! -L $directory/.ssh ]] || ductor_die 'Broker home must not be a symlink.'
@@ -4215,6 +4300,209 @@ ductor_guest_execute() (
         --argjson status "$status" --argjson timedOut "$timed_out" --arg timeoutSignal "$timeout_signal" \
         '{stdout:$stdout,stderr:$stderr,exitCode:$status,signal:null,timedOut:$timedOut,statusEncoding:"shell",timeoutSignal:(if $timeoutSignal == "" then null else $timeoutSignal end)}'
 )
+
+# Container controller: one SSH broker and one lease supervisor. The container
+# uses the host Docker API and never starts a nested Docker daemon or systemd.
+ductor_broker_host_key_files() {
+    local key
+    if ductor_is_container; then
+        key=$DUCTOR_STATE_DIR/container/ssh_host_ed25519_key.pub
+        [[ ! -f $key || -L $key ]] || printf '%s\n' "$key"
+    else
+        for key in /etc/ssh/ssh_host_*_key.pub; do
+            [[ ! -f $key || -L $key ]] || printf '%s\n' "$key"
+        done
+    fi
+}
+
+ductor_container_settings() {
+    ductor_is_container || ductor_die 'This command is provided by the Ductor container image. Native installations use the host SSH service and systemd lease timer.'
+    [[ $EUID == 0 ]] || ductor_die 'The container controller must run as root.'
+    [[ $DUCTOR_STATE_DIR == /var/lib/ductor && $DUCTOR_INSTALL_DIR == /usr/local/bin ]] || ductor_die 'The container controller requires /var/lib/ductor mounted at the same absolute path on the Docker host.'
+    [[ $INCUS_CONF == "$DUCTOR_STATE_DIR/incus" ]] || ductor_die 'The container Incus client identity must remain at /var/lib/ductor/incus so operator and forced broker commands use the same credentials.'
+    DUCTOR_BROKER_LISTEN_ADDRESS=${DUCTOR_BROKER_LISTEN_ADDRESS:-0.0.0.0}
+    DUCTOR_BROKER_PORT=${DUCTOR_BROKER_PORT:-2222}
+    DUCTOR_REAPER_INTERVAL=${DUCTOR_REAPER_INTERVAL:-30}
+    [[ $DUCTOR_BROKER_LISTEN_ADDRESS =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ || $DUCTOR_BROKER_LISTEN_ADDRESS =~ ^[0-9a-fA-F:]*:[0-9a-fA-F:]+$ ]] || ductor_die 'DUCTOR_BROKER_LISTEN_ADDRESS must be a literal IPv4 or IPv6 address.'
+    [[ $DUCTOR_BROKER_PORT =~ ^[1-9][0-9]{0,4}$ ]] && (( DUCTOR_BROKER_PORT <= 65535 )) || ductor_die 'DUCTOR_BROKER_PORT must be between 1 and 65535.'
+    [[ $DUCTOR_REAPER_INTERVAL =~ ^[1-9][0-9]{0,3}$ ]] && (( DUCTOR_REAPER_INTERVAL <= 3600 )) || ductor_die 'DUCTOR_REAPER_INTERVAL must be between 1 and 3600 seconds.'
+}
+
+ductor_container_authorized_key() {
+    local key=$1 destination=/run/ductor-sshd/authorized_keys temporary
+    [[ -d /run/ductor-sshd && ! -L /run/ductor-sshd && ! -L $destination ]] || ductor_die 'The container SSH runtime directory is unavailable or unsafe.'
+    temporary=$(mktemp /run/ductor-sshd/.authorized_keys.XXXXXX) || return
+    if [[ -f $key ]]; then
+        [[ ! -L $key ]] || { rm -f "$temporary"; ductor_die 'The broker public key must not be a symlink.'; }
+        printf 'restrict,command="/usr/bin/sudo -n /usr/local/bin/ductor broker" %s\n' "$(cat "$key")" >"$temporary" || return
+    fi
+    chmod 0644 "$temporary" || return
+    mv -f "$temporary" "$destination"
+}
+
+ductor_container_docker_endpoint() {
+    local endpoint context
+    ductor_require_cmd docker
+    if [[ -n ${DOCKER_CONTEXT:-} ]]; then
+        endpoint=$(docker context inspect "$DOCKER_CONTEXT" --format '{{.Endpoints.docker.Host}}') || return
+    elif [[ -n ${DOCKER_HOST:-} ]]; then
+        endpoint=$DOCKER_HOST
+    else
+        context=$(docker context show) || return
+        endpoint=$(docker context inspect "$context" --format '{{.Endpoints.docker.Host}}') || return
+    fi
+    [[ $endpoint == unix:///var/run/docker.sock ]] || ductor_die 'The controller image requires the local Docker socket at /var/run/docker.sock. Remote Docker contexts cannot preserve its sibling-service bind paths.'
+    [[ -S /var/run/docker.sock ]] || ductor_die 'Bind the host Docker socket to /var/run/docker.sock before starting the controller.'
+}
+
+ductor_container_broker_install() {
+    local key=$1 directory=$DUCTOR_STATE_DIR/container temporary
+    ductor_container_settings
+    [[ -f /run/ductor-sshd/sshd_config && ! -L /run/ductor-sshd/sshd_config ]] || ductor_die 'Start the Ductor container with its default serve command before configuring its broker.'
+    ductor_private_dir "$directory"
+    [[ ! -L $directory/broker_ed25519.pub ]] || ductor_die 'Refusing a symlinked broker public key.'
+    temporary=$(mktemp "$directory/.broker-key.XXXXXX") || return
+    cat "$key" >"$temporary" || return
+    chmod 0600 "$temporary" || return
+    mv -f "$temporary" "$directory/broker_ed25519.pub" || return
+    ductor_container_authorized_key "$directory/broker_ed25519.pub" || return
+    ductor_log 'OpenBao-managed broker public key installed in the container SSH service. The private key remains in the OpenBao credential flow.'
+}
+
+ductor_container_prepare() {
+    local directory=$DUCTOR_STATE_DIR/container runtime=/run/ductor-sshd temporary key
+    ductor_container_settings
+    ductor_require_cmd ssh-keygen ssh-keyscan sshd sudo visudo jq incus
+    ductor_container_docker_endpoint || return
+    id ductor-broker >/dev/null 2>&1 || ductor_die 'The image is missing its dedicated ductor-broker account.'
+    ductor_private_dir "$directory"
+    ductor_private_dir "$INCUS_CONF"
+    [[ ! -L $runtime && ! -L /run/sshd && ! -L /var/lib/ductor-broker ]] || ductor_die 'Refusing symlinked container SSH directories.'
+    install -d -o root -g root -m 0755 "$runtime" /run/sshd /var/lib/ductor-broker || return
+    key=$directory/ssh_host_ed25519_key
+    [[ ! -L $key && ! -L $key.pub ]] || ductor_die 'Refusing symlinked SSH host keys.'
+    if [[ ! -f $key ]]; then
+        temporary=$(mktemp -d "$directory/.host-key.XXXXXX") || return
+        ssh-keygen -q -t ed25519 -N '' -C ductor-controller -f "$temporary/key" || { rm -rf "$temporary"; return 1; }
+        mv "$temporary/key" "$key" || return
+        mv "$temporary/key.pub" "$key.pub" || return
+        rmdir "$temporary" || return
+    fi
+    # Rebuild the public half from the private key, including after an interrupted
+    # first start. Never replace a persisted private key during image updates.
+    temporary=$(mktemp "$directory/.host-public.XXXXXX") || return
+    ssh-keygen -y -P '' -f "$key" >"$temporary" || { rm -f "$temporary"; return 1; }
+    chmod 0600 "$key" "$temporary" || return
+    mv -f "$temporary" "$key.pub" || return
+    ductor_container_authorized_key "$directory/broker_ed25519.pub" || return
+    [[ ! -L /etc/sudoers.d/ductor-broker ]] || ductor_die 'Refusing a symlinked broker sudo policy.'
+    temporary=$(mktemp) || return
+    printf 'ductor-broker ALL=(root) NOPASSWD: /usr/local/bin/ductor broker\n' >"$temporary" || return
+    visudo -cf "$temporary" >/dev/null || { rm -f "$temporary"; ductor_die 'Invalid container broker sudo policy.'; }
+    install -o root -g root -m 0440 "$temporary" /etc/sudoers.d/ductor-broker || return
+    rm -f "$temporary"
+    [[ ! -L $runtime/sshd_config ]] || ductor_die 'Refusing a symlinked SSH server configuration.'
+    temporary=$(mktemp "$runtime/.sshd-config.XXXXXX") || return
+    cat >"$temporary" <<CONFIG
+Port $DUCTOR_BROKER_PORT
+ListenAddress $DUCTOR_BROKER_LISTEN_ADDRESS
+HostKey $key
+PidFile $runtime/sshd.pid
+AuthorizedKeysFile $runtime/authorized_keys
+AllowUsers ductor-broker
+AuthenticationMethods publickey
+PubkeyAuthentication yes
+PasswordAuthentication no
+KbdInteractiveAuthentication no
+PermitEmptyPasswords no
+PermitRootLogin no
+UsePAM no
+StrictModes yes
+DisableForwarding yes
+PermitTTY no
+PermitUserEnvironment no
+PermitUserRC no
+ForceCommand /usr/bin/sudo -n /usr/local/bin/ductor broker
+MaxAuthTries 3
+LoginGraceTime 30
+LogLevel VERBOSE
+CONFIG
+    chmod 0600 "$temporary" || return
+    /usr/sbin/sshd -t -f "$temporary" || { rm -f "$temporary"; return 1; }
+    mv -f "$temporary" "$runtime/sshd_config"
+}
+
+ductor_container_reaper_loop() {
+    local child='' pause=''
+    trap 'trap - TERM INT; [[ -z $child ]] || kill "$child" 2>/dev/null || true; [[ -z $pause ]] || kill "$pause" 2>/dev/null || true; wait 2>/dev/null || true; exit 0' TERM INT
+    while :; do
+        /usr/local/bin/ductor broker reap & child=$!
+        if ! wait "$child"; then ductor_log 'Lease reconciliation will retry; a mutation may currently hold the controller lock.'; fi
+        child=''
+        sleep "$DUCTOR_REAPER_INTERVAL" & pause=$!
+        wait "$pause"
+        pause=''
+    done
+}
+
+ductor_container_health() {
+    local runtime=/run/ductor-sshd pid probe expected observed port address
+    ductor_is_container || return 1
+    [[ -s $runtime/sshd.pid && -s $runtime/reaper.pid && -s $runtime/endpoint.json && -s $DUCTOR_STATE_DIR/container/ssh_host_ed25519_key.pub ]] || return 1
+    for pid in "$runtime/sshd.pid" "$runtime/reaper.pid"; do
+        read -r probe <"$pid" || return 1
+        [[ $probe =~ ^[1-9][0-9]*$ ]] && kill -0 "$probe" 2>/dev/null || return 1
+    done
+    port=$(jq -er .port "$runtime/endpoint.json") || return 1
+    address=$(jq -er .address "$runtime/endpoint.json") || return 1
+    case $address in 0.0.0.0) address=127.0.0.1 ;; ::) address=::1 ;; esac
+    expected=$(awk '{print $1 " " $2}' "$DUCTOR_STATE_DIR/container/ssh_host_ed25519_key.pub") || return 1
+    observed=$(ssh-keyscan -T 2 -p "$port" -t ed25519 "$address" 2>/dev/null | awk '$2=="ssh-ed25519" {print $2 " " $3}') || return 1
+    [[ $observed == "$expected" ]]
+}
+
+ductor_container_status() {
+    local healthy=false fingerprint='' key=$DUCTOR_STATE_DIR/container/ssh_host_ed25519_key.pub
+    ductor_is_container || ductor_die 'Container status is only available in the Ductor image.'
+    if ductor_container_health; then healthy=true; fi
+    if [[ -s $key ]]; then fingerprint=$(ssh-keygen -lf "$key") || return; fi
+    [[ -s /run/ductor-sshd/endpoint.json ]] || ductor_die 'The container supervisor has not started.'
+    jq --argjson healthy "$healthy" --arg fingerprint "$fingerprint" --arg key "$key" '. + {healthy:$healthy,hostKeyFingerprint:$fingerprint,hostKeyFile:$key}' /run/ductor-sshd/endpoint.json
+}
+
+ductor_container_supervisor_lock() {
+    local directory=$DUCTOR_STATE_DIR/container
+    # This lock is independent of the mutation lock and remains held for the
+    # lifetime of the daemon. It belongs to persistent state, so two containers
+    # cannot supervise one inventory even with different SSH ports.
+    ductor_private_dir "$directory"
+    [[ ! -L $directory/supervisor.lock ]] || ductor_die 'Refusing a symlinked supervisor lock.'
+    exec 8>"$directory/supervisor.lock"
+    flock -n 8 || ductor_die 'A container supervisor is already running for this state directory.'
+}
+
+ductor_container_serve() {
+    local ssh_pid='' reaper_pid='' status=1 runtime=/run/ductor-sshd
+    ductor_container_settings
+    ductor_container_supervisor_lock
+    [[ ! -L $runtime ]] || ductor_die 'Refusing a symlinked container SSH directory.'
+    install -d -o root -g root -m 0755 "$runtime" || exit 1
+    ductor_lock
+    ductor_container_prepare || exit 1
+    ductor_unlocked
+    trap 'trap - TERM INT EXIT; [[ -z $reaper_pid ]] || kill "$reaper_pid" 2>/dev/null || true; [[ -z $ssh_pid ]] || kill "$ssh_pid" 2>/dev/null || true; wait 2>/dev/null || true; rm -f "$runtime/sshd.pid" "$runtime/reaper.pid"; exit "$status"' EXIT
+    trap 'status=0; exit 0' TERM INT
+    jq -n --arg address "$DUCTOR_BROKER_LISTEN_ADDRESS" --argjson port "$DUCTOR_BROKER_PORT" '{address:$address,port:$port,user:"ductor-broker"}' >"$runtime/endpoint.json" || exit 1
+    /usr/sbin/sshd -D -e -f "$runtime/sshd_config" 8>&- & ssh_pid=$!
+    printf '%s\n' "$ssh_pid" >"$runtime/sshd.pid"
+    ductor_container_reaper_loop 8>&- & reaper_pid=$!
+    printf '%s\n' "$reaper_pid" >"$runtime/reaper.pid"
+    ductor_log "Container controller listening on $DUCTOR_BROKER_LISTEN_ADDRESS:$DUCTOR_BROKER_PORT. Configure it using docker compose exec ductor ductor setup."
+    ssh-keygen -lf "$DUCTOR_STATE_DIR/container/ssh_host_ed25519_key.pub" >&2 || exit 1
+    if wait -n "$ssh_pid" "$reaper_pid"; then status=1; else status=$?; fi
+    ductor_log 'A container supervisor process stopped. Exiting so Docker can restart the controller.'
+    exit "$status"
+}
 # Interactive configuration is only a front end to the same CLI commands. Every
 # mutation runs in a new Bash process so menu conditionals cannot disable errexit
 # inside deployment code. This fragment is embedded in the single distributable.
@@ -4345,7 +4633,7 @@ ductor_console_run() (
 )
 
 ductor_config_validate() {
-    local file=$1 url
+    local file=$1 url address
     [[ -f $file && ! -L $file ]] || ductor_die 'Configuration must be a regular file.'
     jq -e '
       def ident: type=="string" and test("^[A-Za-z][A-Za-z0-9_-]{0,62}$");
@@ -4355,11 +4643,14 @@ ductor_config_validate() {
       .schemaVersion==1 and (.role=="control" or .role=="worker" or .role=="combined") and
       (.services | type=="object") and (.services.paperclipUrl | type=="string") and
       (.services.gatewayOrigin | type=="string") and (.services.openbaoUrl | type=="string") and
+      ((.services|has("mempalaceUrl")|not) or (.services.mempalaceUrl|type=="string")) and
+      ((.services|has("publish")|not) or (.services.publish|type=="object")) and
       (.nodes | type=="array") and (.profiles | type=="array") and
       ((has("credentials")|not) or (.credentials.openbaoAdminTokenFile | type=="string" and (.=="" or startswith("/")))) and
       ((has("identity")|not) or (.identity.emailDomain | type=="string" and (.=="" or test("^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)+$")))) and
       ((has("access")|not) or (.access==null) or (.access |
         (.managedTls|type=="boolean") and (.email|type=="string") and
+        ((has("trustProxy")|not) or (.trustProxy|type=="boolean")) and
         (.managedTls==false or (.email|test("^[A-Za-z0-9._+-]+@[A-Za-z0-9.-]+\\.[A-Za-z0-9-]+$"))))) and
       ((has("broker")|not) or (.broker |
         (.host|type=="string" and (.=="" or test("^[A-Za-z0-9][A-Za-z0-9.-]*$"))) and
@@ -4385,7 +4676,12 @@ ductor_config_validate() {
         [[ $url =~ ^https://([A-Za-z0-9][A-Za-z0-9.-]*|\[[a-fA-F0-9:]+\])(:[0-9]{1,5})?$ ||
            $url =~ ^http://(localhost|127\.0\.0\.1|\[::1\])(:[0-9]{1,5})?$ ]] ||
             ductor_die 'Service origins must use HTTPS, except HTTP on loopback. Paths, credentials and query strings are not accepted.'
-    done < <(jq -r '.services | .paperclipUrl,.gatewayOrigin,.openbaoUrl' "$file")
+    done < <(jq -r '.services | .paperclipUrl,.gatewayOrigin,.openbaoUrl,(.mempalaceUrl // empty)' "$file")
+    jq -e '.services.publish // {} | to_entries | all((.key=="paperclip" or .key=="contextforge" or .key=="mempalace" or .key=="openbao") and (.value|type=="object") and (.value.bindAddress|type=="string") and (.value.port|type=="number" and floor==. and .>=1024 and .<=65535))' "$file" >/dev/null || ductor_die 'Service publication requires a literal bindAddress and a port from 1024 to 65535.'
+    jq -e '[.services.publish // {} | .[].port] | length==(unique|length)' "$file" >/dev/null || ductor_die 'Each service needs a distinct published port.'
+    while IFS= read -r address; do
+        ductor_services_bind_address "$address" || ductor_die 'Service bindAddress must be a valid IPv4 or IPv6 literal.'
+    done < <(jq -r '.services.publish // {} | .[].bindAddress' "$file")
 }
 
 ductor_config_seed() {
@@ -4395,7 +4691,7 @@ ductor_config_seed() {
     else
         local role=combined
         if [[ -f $DUCTOR_STATE_DIR/setup.json ]]; then role=$(jq -er '.role' "$DUCTOR_STATE_DIR/setup.json") || return 1; fi
-        jq -n --arg role "$role" '{schemaVersion:1,role:$role,services:{paperclipUrl:"http://localhost:3100",gatewayOrigin:"http://localhost:4444",openbaoUrl:"http://localhost:8200"},credentials:{openbaoAdminTokenFile:""},identity:{emailDomain:""},access:{managedTls:false,email:""},broker:{host:"",user:"ductor-broker",port:22,knownHostsFile:""},nodes:[],profiles:[],agents:[]}'
+        jq -n --arg role "$role" --argjson brokerPort "${DUCTOR_BROKER_PORT:-22}" '{schemaVersion:1,role:$role,services:{paperclipUrl:"http://localhost:3100",gatewayOrigin:"http://localhost:4444",openbaoUrl:"http://localhost:8200"},credentials:{openbaoAdminTokenFile:""},identity:{emailDomain:""},access:{managedTls:false,email:"",trustProxy:false},broker:{host:"",user:"ductor-broker",port:$brokerPort,knownHostsFile:""},nodes:[],profiles:[],agents:[]}'
     fi
 }
 
@@ -4448,7 +4744,8 @@ ductor_config() {
 # confirmed that its advertised broker host is this machine. Never ssh-keyscan.
 ductor_config_broker_host_key() (
     umask 077
-    local host=${1:-} port=${2:-22} source=/etc/ssh/ssh_host_ed25519_key.pub directory="$DUCTOR_STATE_DIR/transport" key_type key_data temporary target
+    local host=${1:-} port=${2:-${DUCTOR_BROKER_PORT:-22}} source directory="$DUCTOR_STATE_DIR/transport" key_type key_data temporary target
+    source=$(ductor_broker_host_key_files | awk '/ssh_host_ed25519_key.pub$/ {print;exit}') || return 1
     (($#>=1 && $#<=2)) || ductor_die 'Usage: ductor config broker-host-key HOST [PORT]'
     [[ $host =~ ^[A-Za-z0-9][A-Za-z0-9.-]*$ && $port =~ ^[1-9][0-9]{0,4}$ ]] && ((port<=65535)) || ductor_die 'Invalid broker host or SSH port.'
     [[ -f $source && ! -L $source && $(stat -c %u -- "$source") == 0 ]] || ductor_die 'A root-owned local Ed25519 SSH host public key is required.'
@@ -4533,7 +4830,7 @@ ductor_wizard_node() (
 
 ductor_wizard() (
     umask 077
-    local work role paperclip gateway bao token_file domain secret='' company applied=false retry=false email login_url tls_policy
+    local work role paperclip gateway bao token_file domain secret='' company applied=false retry=false login_url
     # This runs before jq, configuration parsing or dialog selection on a clean
     # host. The child dependency command owns package-manager confirmation.
     ductor_console_dependencies tools || return 1
@@ -4558,19 +4855,10 @@ ductor_wizard() (
     if [[ -n $token_file ]]; then
         [[ $token_file == /* && -f $token_file && ! -L $token_file && $(stat -c %a -- "$token_file") == 600 && $(stat -c %u -- "$token_file") == "$(id -u)" ]] || { ductor_ui_message 'Private token file required' 'The token file must be an absolute regular file owned by this operator with mode 600.'; return 1; }
     fi
-    jq --arg role "$role" --arg paperclip "${paperclip%/}" --arg gateway "${gateway%/}" --arg bao "${bao%/}" --arg token "$token_file" --arg domain "$domain" '.role=$role | .services={paperclipUrl:$paperclip,gatewayOrigin:$gateway,openbaoUrl:$bao} | .credentials.openbaoAdminTokenFile=$token | .identity.emailDomain=$domain' "$work/config" >"$work/next" || return 1
+    jq --arg role "$role" --arg paperclip "${paperclip%/}" --arg gateway "${gateway%/}" --arg bao "${bao%/}" --arg token "$token_file" --arg domain "$domain" '.role=$role | .services.paperclipUrl=$paperclip | .services.gatewayOrigin=$gateway | .services.openbaoUrl=$bao | .credentials.openbaoAdminTokenFile=$token | .identity.emailDomain=$domain' "$work/config" >"$work/next" || return 1
     mv "$work/next" "$work/config"
-    if [[ $role != worker ]] && ductor_ui_confirm 'Managed HTTPS' 'Configure how team members reach these services? Ductor can run Caddy with managed TLS for your three HTTPS service hostnames after native account ownership is established. DNS must point here and ports 80/443 must be available.'; then
-        tls_policy=$(ductor_ui_menu 'Team access' 'Choose TLS ownership. The service origins above remain the desired public addresses.' managed 'Ductor manages Caddy and HTTPS certificates' external 'Use an existing reverse proxy or private forwarding') || return 0
-        case $tls_policy in
-            managed)
-                email=$(ductor_ui_input 'Managed HTTPS' 'Real email address for TLS certificate notifications' "$(jq -r '.access.email // ""' "$work/config")") || return 0
-                jq --arg email "$email" '.access={managedTls:true,email:$email}' "$work/config" >"$work/next" || return 1
-                ;;
-            external) jq '.access={managedTls:false,email:(.access.email // "")}' "$work/config" >"$work/next" || return 1 ;;
-            *) ductor_ui_message 'Invalid TLS policy' 'Choose managed or external.'; return 1 ;;
-        esac
-        mv "$work/next" "$work/config"
+    if [[ $role != worker ]] && ductor_ui_confirm 'Service networking' 'Configure each Docker service listen address and port for your own reverse proxy? TLS certificates and domains remain under your control. Existing settings are retained if you defer this.'; then
+        ductor_console_network_form "$work/config" || return 1
     fi
     if ductor_ui_confirm 'Broker transport' 'Configure the authenticated SSH broker used by Paperclip to request isolated environments? You can leave this pending until the controller has an advertised address.'; then
         if ductor_wizard_broker "$work/config" >"$work/broker"; then
@@ -4589,7 +4877,7 @@ ductor_wizard() (
         fi
     fi
     ductor_config_validate "$work/config" || return 1
-    if ! ductor_ui_confirm 'Save configuration' "Save the desired configuration for role '$role'?\n\n$(jq -r '.services | to_entries[] | .key+": "+.value' "$work/config")\n\nServers: $(jq '.nodes|length' "$work/config")\nExisting agent profiles are retained. Saving does not mark any service ready."; then return 0; fi
+    if ! ductor_ui_confirm 'Save configuration' "Save the desired configuration for role '$role'?\n\n$(jq -r '.services | to_entries[] | select(.value|type=="string") | .key+": "+.value' "$work/config")\n\nServers: $(jq '.nodes|length' "$work/config")\nExisting agent profiles are retained. Saving does not mark any service ready."; then return 0; fi
     ductor_console_exec config import "$work/config" || return 1
     if ductor_ui_confirm 'Create an agent type' 'Configure a reusable agent type now? The form needs your Paperclip company, connected ChatGPT subscription/grant IDs and exact model. If initial account onboarding is still pending, choose Agent types from the menu afterward.'; then
         ductor_console_profile_create || ductor_ui_message 'Agent type pending' 'The saved infrastructure configuration was retained. Complete the agent type from the menu when its required account and image details are available.'
@@ -4611,7 +4899,7 @@ ductor_wizard() (
         if ductor_ui_confirm 'Paperclip sign-in' 'Connect this controller to your Paperclip company using its native browser approval flow now? Provider subscriptions are configured in Paperclip.'; then
             login_url=$(ductor_console_paperclip_url) || return 1
             if [[ $login_url == http://localhost:* || $login_url == http://127.0.0.1:* ]]; then
-                ductor_ui_message 'Private first-run sign-in' "Paperclip currently serves $login_url. On a remote server, securely forward that loopback port to your computer before opening the native onboarding and approval links. Complete the initial owner claim there. Public HTTPS is enabled after ownership and service initialization checks."
+                ductor_ui_message 'Private first-run sign-in' "Paperclip currently uses $login_url for onboarding. Forward that port to your computer before opening the approval links and completing the owner claim. Your reverse proxy and desired public origins are checked during apply."
             fi
             company=$(ductor_ui_input 'Paperclip company' 'Company UUID shown in Paperclip') || return 0
             if ductor_console_exec paperclip login --url "$login_url" --company "$company"; then retry=true; else
@@ -4649,10 +4937,10 @@ ductor_wizard_broker() (
     local config=$1 host user port known
     host=$(ductor_ui_input 'Broker transport' 'Broker host reachable from the Paperclip service; blank leaves provisioning pending' "$(jq -r '.broker.host // ""' "$config")") || return 1
     user=$(ductor_ui_input 'Broker transport' 'Dedicated SSH broker username' "$(jq -r '.broker.user // "ductor-broker"' "$config")") || return 1
-    port=$(ductor_ui_budget 'Broker SSH port' "$(jq -r '.broker.port // 22' "$config")" 65535) || return 1
+    port=$(ductor_ui_budget 'Broker SSH port' "$(jq -r --argjson port "${DUCTOR_BROKER_PORT:-22}" '.broker.port // $port' "$config")" 65535) || return 1
     known=$(ductor_ui_input 'Broker transport' 'Absolute path to independently verified SSH known_hosts file; blank configures later' "$(jq -r '.broker.knownHostsFile // ""' "$config")") || return 1
     if [[ -n $host && -z $known && $(jq -r .role "$config") != worker ]] &&
-        ductor_ui_confirm 'Use this server identity' "Does '$host' point to this controller's SSH daemon? Use this machine's existing root-owned /etc/ssh/ssh_host_ed25519_key.pub as the trusted identity. Only confirm for this machine; remote identities must be independently verified."; then
+        ductor_ui_confirm 'Use this server identity' "Does '$host' point to this controller's SSH broker? Use this controller's persistent Ed25519 SSH host public key as the trusted identity. Only confirm for this controller; remote identities must be independently verified."; then
         known=$(ductor_console_exec config broker-host-key "$host" "$port") || return 1
     fi
     if [[ -n $known ]]; then
@@ -4849,9 +5137,10 @@ ductor_console_profiles() {
 
 ductor_console_connections() {
     local action name url company
-    action=$(ductor_ui_menu 'Connections' 'Test readiness or authenticate through native Paperclip.' doctor 'Check infrastructure dependencies' paperclip 'Check Paperclip operator connection' login 'Connect Paperclip with browser approval' bao-init 'Initialize OpenBao with a new private recovery file' bao-unseal 'Enter hidden OpenBao unseal shares' credentials 'Configure private OpenBao administration token' secret 'Import or version a scoped service credential' broker 'Configure verified broker SSH transport' chat 'Enable native Paperclip Agent Chat' bindings 'Verify a complete agent binding' urls 'Show service endpoints') || return 0
+    action=$(ductor_ui_menu 'Connections' 'Test readiness or authenticate through native Paperclip.' doctor 'Check infrastructure dependencies' networking 'Service networking and external reverse proxy' paperclip 'Check Paperclip operator connection' login 'Connect Paperclip with browser approval' bao-init 'Initialize OpenBao with a new private recovery file' bao-unseal 'Enter hidden OpenBao unseal shares' credentials 'Configure private OpenBao administration token' secret 'Import or version a scoped service credential' broker 'Configure verified broker SSH transport' chat 'Enable native Paperclip Agent Chat' bindings 'Verify a complete agent binding' urls 'Show service endpoints') || return 0
     case $action in
         doctor) ductor_console_run 'Infrastructure diagnostics' doctor ;;
+        networking) ductor_console_network ;;
         paperclip) ductor_console_run 'Paperclip connection' paperclip status ;;
         credentials) ductor_console_credentials ;;
         bao-init) ductor_console_bao_init ;;
@@ -4871,6 +5160,55 @@ ductor_console_connections() {
         *) return 1 ;;
     esac
 }
+
+ductor_console_network_form() {
+    local config=$1 name key default_port address port old_address old_port url trust=false temporary
+    local settings="$DUCTOR_STATE_DIR/services/settings.env"
+    for name in paperclip contextforge mempalace openbao; do
+        key=${name^^}
+        case $name in paperclip) default_port=3100 ;; contextforge) default_port=4444 ;; mempalace) default_port=8765 ;; openbao) default_port=8200 ;; esac
+        old_address=127.0.0.1; old_port=$default_port
+        if [[ -f $settings && ! -L $settings ]]; then
+            old_address=$(ductor_services_value "${key}_BIND_ADDRESS" "$settings") || return 1
+            old_port=$(ductor_services_value "${key}_PORT" "$settings") || return 1
+        fi
+        address=$(jq -r --arg name "$name" --arg fallback "${old_address:-127.0.0.1}" '.services.publish[$name].bindAddress // $fallback' "$config") || return 1
+        port=$(jq -r --arg name "$name" --argjson fallback "${old_port:-$default_port}" '.services.publish[$name].port // $fallback' "$config") || return 1
+        address=$(ductor_ui_input 'Service networking' "$name published IPv4/IPv6 address; loopback for a same-host proxy" "$address") || return 1
+        ductor_services_bind_address "$address" || { ductor_ui_message 'Invalid address' 'Enter a literal IPv4 or IPv6 address, without brackets or a hostname.'; return 1; }
+        port=$(ductor_ui_budget "$name published Docker port (1024–65535)" "$port" 65535) || return 1
+        ductor_services_port "$port" || return 1
+        temporary=$(mktemp "${config%/*}/.network.XXXXXXXX") || return 1
+        jq --arg name "$name" --arg address "$address" --argjson port "$port" '.services.publish[$name]={bindAddress:$address,port:$port}' "$config" >"$temporary" || { rm -f "$temporary"; return 1; }
+        mv -f "$temporary" "$config" || return 1
+    done
+    for name in paperclipUrl gatewayOrigin openbaoUrl; do
+        url=$(ductor_ui_input 'External reverse proxy' "$name public origin; your proxy owns TLS certificates" "$(jq -r --arg name "$name" '.services[$name]' "$config")") || return 1
+        temporary=$(mktemp "${config%/*}/.network.XXXXXXXX") || return 1
+        jq --arg name "$name" --arg url "${url%/}" '.services[$name]=$url' "$config" >"$temporary" || { rm -f "$temporary"; return 1; }
+        mv -f "$temporary" "$config" || return 1
+    done
+    url=$(ductor_ui_input 'External reverse proxy' 'Optional MemPalace public HTTPS origin; blank keeps direct access local' "$(jq -r '.services.mempalaceUrl // ""' "$config")") || return 1
+    if ductor_ui_confirm 'Trusted reverse proxy' 'Does exactly one trusted reverse proxy terminate Paperclip HTTPS and replace forwarded headers? Enable only when the published Paperclip port is restricted to that proxy.'; then trust=true; fi
+    temporary=$(mktemp "${config%/*}/.network.XXXXXXXX") || return 1
+    jq --arg memory "${url%/}" --argjson trust "$trust" '.access.managedTls=false | .access.email=(.access.email // "") | .access.trustProxy=$trust | if $memory=="" then del(.services.mempalaceUrl) else .services.mempalaceUrl=$memory end' "$config" >"$temporary" || { rm -f "$temporary"; return 1; }
+    mv -f "$temporary" "$config" || return 1
+    ductor_config_validate "$config"
+}
+
+ductor_console_network() (
+    umask 077
+    local work
+    work=$(mktemp -d "${TMPDIR:-/tmp}/ductor-network.XXXXXXXX") || return 1
+    trap 'rm -rf -- "$work"' EXIT
+    ductor_config_seed >"$work/config" || return 1
+    [[ $(jq -r .role "$work/config") != worker ]] || { ductor_ui_message 'Controller setting' 'Published service ports are configured on the shared-services controller. Edit remote service URLs through setup on this worker.'; return 1; }
+    ductor_console_network_form "$work/config" || return 1
+    if ductor_ui_confirm 'Save service networking' 'Save these service ports and external proxy origins? Apply recreates the affected containers while preserving their data volumes.'; then
+        ductor_console_exec config import "$work/config" || return 1
+        if ductor_ui_confirm 'Apply service networking' 'Apply the saved configuration now?'; then ductor_console_run 'Apply service networking' apply; fi
+    fi
+)
 
 ductor_console_broker() (
     umask 077
@@ -5001,15 +5339,71 @@ ductor_apply_services() {
     local config=$1 settings="$DUCTOR_STATE_DIR/services/settings.env" paperclip domain
     domain=$(jq -r '.identity.emailDomain // ""' "$config") || return 1
     paperclip="http://localhost:${DUCTOR_PAPERCLIP_PORT:-3100}"
-    if [[ -f $settings ]]; then paperclip=$(ductor_services_value PAPERCLIP_PUBLIC_URL "$settings") || return 1; fi
+    if [[ -f $settings ]]; then
+        paperclip=$(ductor_services_value PAPERCLIP_PUBLIC_URL "$settings") || return 1
+    elif [[ $(jq -r '.access.managedTls // false' "$config") == false ]]; then
+        # A fresh external-proxy installation owns its canonical origin from
+        # the first native account claim, including custom published ports.
+        paperclip=$(jq -r .services.paperclipUrl "$config") || return 1
+    fi
     # ContextForge creates its administrator on initial database bootstrap.
     # Only that first bootstrap uses this email; changing it cannot rename a DB user.
-    # Retain the last applied origins, or bootstrap on loopback. Desired HTTPS
-    # does not become canonical until native ownership/login and TLS succeed.
+    # Retain established origins until native ownership and TLS checks succeed.
+    # Managed TLS starts privately; an external proxy uses its declared origin.
     DUCTOR_PAPERCLIP_URL="$paperclip" DUCTOR_ADMIN_EMAIL="admin@$domain" ductor_apply_service_pins || return 1
     DUCTOR_PAPERCLIP_URL="$paperclip" DUCTOR_ADMIN_EMAIL="admin@$domain" ductor_services_prepare || return 1
+    ductor_apply_service_network "$config" "$settings" || return 1
+    if [[ $(jq -r '.access.managedTls // false' "$config") == false && -f $DUCTOR_STATE_DIR/services/Caddyfile ]]; then
+        ductor_services_compose stop caddy || return 1
+        mv -- "$DUCTOR_STATE_DIR/services/Caddyfile" "$DUCTOR_STATE_DIR/services/Caddyfile.disabled.$(date -u +%Y%m%dT%H%M%S)" || return 1
+    fi
     ductor_services_up
 }
+
+ductor_apply_service_network() (
+    umask 077
+    local config=$1 destination=$2 settings name key address port host public
+    local -A published_ports_seen=()
+    settings=$(mktemp "${destination%/*}/.network-settings.XXXXXXXX") || return 1
+    trap 'rm -f -- "$settings"' EXIT
+    cp -- "$destination" "$settings" || return 1
+    if [[ $(jq -r '.access.trustProxy // false' "$config") == true ]]; then
+        ductor_services_setting_set PAPERCLIP_TRUST_PROXY 1 "$settings" || return 1
+    elif [[ $(jq -r '.access.managedTls // false' "$config") != true ]]; then
+        ductor_services_setting_set PAPERCLIP_TRUST_PROXY false "$settings" || return 1
+    fi
+    # A missing publication block means keep the existing release's bindings.
+    while IFS=$'\t' read -r name address port; do
+        [[ -n $name ]] || continue
+        key=${name^^}
+        ductor_services_bind_address "$address" && ductor_services_port "$port" || return 1
+        ductor_services_setting_set "${key}_BIND_ADDRESS" "$address" "$settings" || return 1
+        ductor_services_setting_set "${key}_PORT" "$port" "$settings" || return 1
+    done < <(jq -r '.services.publish // {} | to_entries[] | [.key,.value.bindAddress,(.value.port|tostring)] | @tsv' "$config")
+    public=$(jq -r '.services.paperclipUrl' "$config") || return 1
+    host=${public#*://}; host=${host%%:*}
+    [[ $public != *'['* ]] || { host=${public#*\[}; host=${host%%\]*}; }
+    address=$(ductor_services_value PAPERCLIP_BIND_ADDRESS "$settings") || return 1
+    ductor_services_setting_set PAPERCLIP_ALLOWED_HOSTNAMES "localhost,127.0.0.1,::1,$host,${address:-127.0.0.1}" "$settings" || return 1
+    public=$(jq -r '.services.mempalaceUrl // ""' "$config") || return 1
+    if [[ -n $public ]]; then
+        host=${public#*://}
+        ductor_services_setting_set MEMPALACE_PUBLIC_URL "$public" "$settings" || return 1
+        ductor_services_setting_set MEMPALACE_ALLOWED_HOSTS "mempalace,mempalace:8765,$host" "$settings" || return 1
+    else
+        ductor_services_setting_set MEMPALACE_PUBLIC_URL '' "$settings" || return 1
+        ductor_services_setting_set MEMPALACE_ALLOWED_HOSTS 'mempalace,mempalace:8765' "$settings" || return 1
+    fi
+    for key in PAPERCLIP CONTEXTFORGE MEMPALACE OPENBAO; do
+        port=$(ductor_services_value "${key}_PORT" "$settings") || return 1
+        # Older fixture/config files are completed by services prepare.
+        [[ -n $port ]] || continue
+        ductor_services_port "$port" || return 1
+        [[ -z ${published_ports_seen[$port]:-} ]] || { ductor_log 'Each service needs a distinct published port.'; return 1; }
+        published_ports_seen[$port]=$key
+    done
+    chmod 600 "$settings" && mv -f -- "$settings" "$destination"
+)
 
 ductor_apply_access() {
     local config=$1 work=$2 settings="$DUCTOR_STATE_DIR/services/settings.env" paperclip forge bao email host url path index bootstrap_url
@@ -5044,6 +5438,11 @@ ductor_apply_access() {
         DUCTOR_PC_URL=$paperclip
         ductor_pc_operator admin || return 1
         ductor_apply_service_origins "$paperclip" "$forge" "$bao" "$settings" || return 1
+        if [[ $(jq -r '.access.trustProxy // false' "$config") == true ]]; then
+            ductor_services_setting_set PAPERCLIP_TRUST_PROXY 1 "$settings" || return 1
+        else
+            ductor_services_setting_set PAPERCLIP_TRUST_PROXY false "$settings" || return 1
+        fi
         ductor_services_compose up -d --no-deps --wait --wait-timeout 120 paperclip contextforge || return 1
     fi
     DUCTOR_PC_URL=$paperclip
@@ -5056,13 +5455,14 @@ ductor_apply_access() {
 }
 
 ductor_apply_service_origins() {
-    local paperclip=$1 forge=$2 bao=$3 settings=$4 host
+    local paperclip=$1 forge=$2 bao=$3 settings=$4 host address
     host=${paperclip#*://}
     if [[ $host == \[* ]]; then host=${host#\[}; host=${host%%\]*}; else host=${host%%:*}; fi
     ductor_services_setting_set PAPERCLIP_PUBLIC_URL "$paperclip" "$settings" || return 1
     ductor_services_setting_set CONTEXTFORGE_PUBLIC_URL "$forge" "$settings" || return 1
     ductor_services_setting_set OPENBAO_PUBLIC_URL "$bao" "$settings" || return 1
-    ductor_services_setting_set PAPERCLIP_ALLOWED_HOSTNAMES "localhost,127.0.0.1,$host" "$settings" || return 1
+    address=$(ductor_services_value PAPERCLIP_BIND_ADDRESS "$settings") || return 1
+    ductor_services_setting_set PAPERCLIP_ALLOWED_HOSTNAMES "localhost,127.0.0.1,::1,$host,${address:-127.0.0.1}" "$settings" || return 1
     if [[ $forge == https://* ]]; then
         ductor_services_setting_set CONTEXTFORGE_SECURE_COOKIES true "$settings" || return 1
     else
@@ -5125,10 +5525,10 @@ ductor_apply_broker_identity() {
         read -r _ type key _ <<<"$line"
         [[ -n $type && -n $key ]] || continue
         key_match=false
-        for local_key in /etc/ssh/ssh_host_*_key.pub; do
+        while IFS= read -r local_key; do
             [[ -f $local_key && ! -L $local_key ]] || continue
             if [[ $(awk '{print $1 " " $2}' "$local_key") == "$type $key" ]]; then matched=true; key_match=true; fi
-        done
+        done < <(ductor_broker_host_key_files)
         $key_match || { ductor_log 'A broker host key belongs to a different machine. Keep only verified SSH host keys belonging to this controller.'; return 1; }
     done < <(ssh-keygen -F "$host" -f "$known")
     $matched || { ductor_log 'The configured broker host key does not match this controller. Install the broker on its actual controller or supply the verified SSH host key for this controller.'; return 1; }
@@ -5295,7 +5695,7 @@ ductor_main() {
     # Read-only probes do not hold the controller lock. Mutations serialize across
     # menu, installer, CLI and integrations on this controller host.
     case "$command:${1:-}" in
-        setup:*|wizard:*|console:*|broker:*|menu:*|doctor:*|status:*|plan:*|services:status|services:urls|nodes:list|nodes:probe|nodes:help|vm:list|vm:help|paperclip:status|paperclip:projects|paperclip:agents|paperclip:environments|paperclip:models|paperclip:help|bindings:check|bindings:help) ;;
+        setup:*|wizard:*|console:*|broker:*|menu:*|doctor:*|status:*|serve:*|container-health:*|container-status:*|plan:*|services:status|services:urls|nodes:list|nodes:probe|nodes:help|vm:list|vm:help|paperclip:status|paperclip:projects|paperclip:agents|paperclip:environments|paperclip:models|paperclip:help|bindings:check|bindings:help) ;;
         *) ductor_lock ;;
     esac
     case $command in
@@ -5330,6 +5730,9 @@ ductor_main() {
         profiles) ductor_profiles "$@" ;;
         agents) ductor_agents "$@" ;;
         broker) ductor_broker "$@" ;;
+        serve) [[ $# == 0 ]] || ductor_die 'Usage: ductor serve'; ductor_container_serve ;;
+        container-health) [[ $# == 0 ]] || ductor_die 'Usage: ductor container-health'; ductor_container_health ;;
+        container-status) [[ $# == 0 ]] || ductor_die 'Usage: ductor container-status'; ductor_container_status ;;
         config) ductor_config "$@" ;;
         apply) ductor_apply "$@" ;;
         status)

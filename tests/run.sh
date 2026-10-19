@@ -19,7 +19,7 @@ else
     guest_status=77
 fi
 [[ $guest_status == 0 || $guest_status == 77 ]] || exit "$guest_status"
-for test in installer inventory platform codex services services-ssh services-access-upgrade services-secrets paperclip bindings provider profiles console broker apply spawn conversation; do
+for test in installer container-runtime inventory platform codex services services-ssh services-access-upgrade services-secrets paperclip bindings provider profiles console broker apply spawn conversation; do
     bash "$ROOT/tests/$test.sh"
 done
 printf 'All Ductor offline checks passed.\n'

@@ -19,6 +19,25 @@ ductor_services_prepare
 [[ $first == "$(sha256sum "$DUCTOR_STATE_DIR/services/secrets.env")" ]]
 [[ $(stat -c %a "$DUCTOR_STATE_DIR/services/secrets.env") == 600 ]]
 [[ $(stat -c %a "$DUCTOR_STATE_DIR/services") == 700 ]]
+# Published listeners are independent from public proxy origins; an update must
+# preserve both literal IPv6/IPv4 addresses and operator-selected ports.
+for address in 127.0.0.1 0.0.0.0 192.0.2.10 :: ::1 2001:db8::10 2001:db8:0:0:0:0:0:10; do
+    ductor_services_bind_address "$address"
+done
+for address in 256.0.0.1 01.2.3.4 example.com ':::' '1::2::3' '1::2:' ':1::2' '1:2:3' '[::1]' '::1%eth0' '127.0.0.1;false'; do
+    if ductor_services_bind_address "$address"; then printf 'Accepted invalid bind address: %s\n' "$address" >&2; exit 1; fi
+done
+ductor_services_setting_set PAPERCLIP_BIND_ADDRESS 192.0.2.10 "$DUCTOR_STATE_DIR/services/settings.env"
+ductor_services_setting_set PAPERCLIP_PORT 13100 "$DUCTOR_STATE_DIR/services/settings.env"
+ductor_services_setting_set OPENBAO_BIND_ADDRESS ::1 "$DUCTOR_STATE_DIR/services/settings.env"
+ductor_services_prepare
+[[ $(ductor_services_local_origin PAPERCLIP) == http://192.0.2.10:13100 ]]
+[[ $(ductor_services_local_origin OPENBAO) == 'http://[::1]:8200' ]]
+ductor_services_setting_set OPENBAO_BIND_ADDRESS :: "$DUCTOR_STATE_DIR/services/settings.env"
+[[ $(ductor_services_local_origin OPENBAO) == 'http://[::1]:8200' ]]
+ductor_services_setting_set CONTEXTFORGE_BIND_ADDRESS 0.0.0.0 "$DUCTOR_STATE_DIR/services/settings.env"
+[[ $(ductor_services_local_origin CONTEXTFORGE) == http://127.0.0.1:4444 ]]
+[[ $first == "$(sha256sum "$DUCTOR_STATE_DIR/services/secrets.env")" ]]
 for name in project-one project-two; do ductor_services_memory_scope "$name" --prepare; done
 first=$(sha256sum "$DUCTOR_STATE_DIR/services/memory/project-one/token")
 ductor_services_memory_scope project-one --prepare
@@ -58,6 +77,9 @@ if (DUCTOR_PAPERCLIP_PORT=4444 ductor_services_prepare >/dev/null 2>&1); then ex
 if [[ -n ${DUCTOR_COMPOSE_TEST_BIN:-} ]]; then
     "$DUCTOR_COMPOSE_TEST_BIN" --env-file "$DUCTOR_STATE_DIR/services/settings.env" \
         --env-file "$DUCTOR_STATE_DIR/services/secrets.env" -f "$DUCTOR_STATE_DIR/services/compose.yaml" config --quiet
+    "$DUCTOR_COMPOSE_TEST_BIN" --env-file "$DUCTOR_STATE_DIR/services/settings.env" \
+        --env-file "$DUCTOR_STATE_DIR/services/secrets.env" -f "$DUCTOR_STATE_DIR/services/compose.yaml" config --format json >"$TEST_ROOT/compose.json"
+    jq -e '.services.paperclip.ports[0].host_ip=="192.0.2.10" and .services.paperclip.ports[0].published=="13100" and .services.openbao.ports[0].host_ip=="::" and (.services["paperclip-db"].ports // [] | length)==0 and (.services["contextforge-db"].ports // [] | length)==0' "$TEST_ROOT/compose.json" >/dev/null
     "$DUCTOR_COMPOSE_TEST_BIN" --env-file "$DUCTOR_STATE_DIR/services/settings.env" \
         --env-file "$DUCTOR_STATE_DIR/services/secrets.env" -f "$DUCTOR_STATE_DIR/services/compose.yaml" \
         --profile ssh-credentials config --quiet
