@@ -36,7 +36,12 @@ prepare() {
 run_guest() {
     setpriv --reuid=65534 --regid=65534 --clear-groups /bin/bash -c 'source "$1"; ductor_guest_execute "$2"' guest "$TEST_DIR/guest.sh" "$TEST_DIR/request.json"
 }
-assert() { jq -e "$1" "$TEST_DIR/result.json" >/dev/null || { cat "$TEST_DIR/result.json"; printf 'Assertion failed: %s\n' "$1" >&2; exit 1; }; }
+guest_result_summary() {
+    [[ -f $TEST_DIR/result.json ]] || return 0
+    jq '{exitCode,timedOut,timeoutSignal,error,stdoutLength:(.stdout|length),stderrLength:(.stderr|length),stdoutPreview:(.stdout[:160]),stderrPreview:(.stderr[:160])}' "$TEST_DIR/result.json" >&2 || true
+}
+trap 'printf "Guest fixture failed at line %s (status %s)\n" "$LINENO" "$?" >&2; guest_result_summary' ERR
+assert() { jq -e "$1" "$TEST_DIR/result.json" >/dev/null || { guest_result_summary; printf 'Assertion failed: %s\n' "$1" >&2; exit 1; }; }
 expect_rejection() {
     if run_guest > "$TEST_DIR/result.json"; then printf 'Expected execution rejection\n' >&2; exit 1; fi
     assert '.exitCode == 125 and (.error|length)>0'
