@@ -46,6 +46,23 @@ expect_rejection() {
     if run_guest > "$TEST_DIR/result.json"; then printf 'Expected execution rejection\n' >&2; exit 1; fi
     assert '.exitCode == 125 and (.error|length)>0'
 }
+# jq 1.6 contains("\\u0000") uses C string matching and falsely matches every
+# string. Exercise both valid values and embedded NULs through the real helper.
+prepare '{command:"/bin/bash",args:["-c","printf \"%s:%s\" \"$1\" \"$VALUE\"","guest","valid argument"],env:{VALUE:"valid value"},cwd:$cwd,timeoutMs:5000}'
+run_guest > "$TEST_DIR/result.json"
+assert '.exitCode == 0 and .stdout == "valid argument:valid value" and .stderr == ""'
+prepare '{command:"/bin/true\u0000",args:[],cwd:$cwd,timeoutMs:5000}'
+expect_rejection
+assert '.error == "Invalid execution request schema"'
+prepare '{command:"/bin/true",args:[],cwd:($cwd+"\u0000"),timeoutMs:5000}'
+expect_rejection
+assert '.error == "Invalid execution request schema"'
+prepare '{command:"/bin/true",args:["argument\u0000suffix"],cwd:$cwd,timeoutMs:5000}'
+expect_rejection
+assert '.error == "Invalid execution request schema"'
+prepare '{command:"/bin/true",args:[],env:{VALUE:"value\u0000suffix"},cwd:$cwd,timeoutMs:5000}'
+expect_rejection
+assert '.error == "Invalid execution request schema"'
 prepare '{command:"/bin/bash",args:["-c","printf \"%s\\n\" \"$VALUE\"; pwd; cat; printf failure >&2; exit 7"],env:{VALUE:"literal $(touch /tmp/ductor-should-not-exist)"},cwd:$cwd,stdin:"input\n",timeoutMs:5000}'
 run_guest > "$TEST_DIR/result.json"
 assert '.exitCode == 7 and .timedOut == false and .stderr == "failure" and (.stdout|startswith("literal $(touch /tmp/ductor-should-not-exist)\n")) and (.stdout|endswith("input\n"))'
@@ -71,10 +88,12 @@ chmod 0777 "$TEST_DIR"
 expect_rejection
 chmod 0755 "$TEST_DIR"
 # A result larger than the historical 16 MiB boundary must be returned whole.
-prepare '{command:"/bin/bash",args:["-c","yes x | head -c 18000000"],cwd:$cwd,timeoutMs:30000}'
+# Use a finite producer: runners can inherit SIGPIPE ignored, in which case
+# `yes | head` legitimately adds a broken-pipe diagnostic to stderr.
+prepare '{command:"/bin/bash",args:["-c","head -c 18000000 /dev/zero | tr \"\\000\" x"],cwd:$cwd,timeoutMs:30000}'
 run_guest > "$TEST_DIR/result.json"
 assert '.exitCode == 0 and (.stdout|length) == 18000000 and .stderr == ""'
-prepare '{command:"/bin/bash",args:["-c","yes x | head -c 34000000"],cwd:$cwd,timeoutMs:30000}'
+prepare '{command:"/bin/bash",args:["-c","head -c 34000000 /dev/zero | tr \"\\000\" x"],cwd:$cwd,timeoutMs:30000}'
 expect_rejection
 assert '.error|contains("32 MiB")'
 prepare '{command:"/bin/bash",args:["-c","printf \"\\377\""],cwd:$cwd,timeoutMs:5000}'

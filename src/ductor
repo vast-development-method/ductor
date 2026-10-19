@@ -4123,10 +4123,10 @@ ductor_guest_execute() (
     /usr/bin/jq -e '
       type == "object" and
       ((keys - ["command","args","cwd","env","stdin","timeoutMs"]) | length == 0) and
-      (.command | type == "string" and length > 0 and (contains("\u0000")|not)) and
-      (.cwd | type == "string" and startswith("/") and (contains("\u0000")|not)) and
-      ((.args // []) | type == "array" and all(type == "string" and (contains("\u0000")|not))) and
-      ((.env // {}) | type == "object" and (to_entries | all((.key | test("^[A-Za-z_][A-Za-z0-9_]*$")) and (.value | type == "string" and (contains("\u0000")|not))))) and
+      (.command | type == "string" and length > 0 and (index("\u0000")==null)) and
+      (.cwd | type == "string" and startswith("/") and (index("\u0000")==null)) and
+      ((.args // []) | type == "array" and all(type == "string" and (index("\u0000")==null))) and
+      ((.env // {}) | type == "object" and (to_entries | all((.key | test("^[A-Za-z_][A-Za-z0-9_]*$")) and (.value | type == "string" and (index("\u0000")==null))))) and
       ((.stdin // "") | type == "string") and
       (.timeoutMs | type == "number" and floor == . and . >= 1 and . <= 86400000)
     ' "$file_path" >/dev/null 2>&1 || { guest_error 'Invalid execution request schema'; return 1; }
