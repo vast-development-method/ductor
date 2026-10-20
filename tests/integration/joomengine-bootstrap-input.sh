@@ -41,6 +41,8 @@ for transform in \
     '.api_base="https://joomla.test/../api/index.php"' \
     '.client.permissions={"root.1":{"core.admin":true}}' \
     '.client.permissions={"com_content":{"core.admin":true}}' \
+    '.client.permissions={"com_content":{"core.login.admin":true}}' \
+    '.client.permissions={"com_content":{"core.create":false}}' \
     '.client.permissions={"com_content":{"core.create":"yes"}}' \
     '.client.password="weak"' \
     '.client.username="../root"' \
