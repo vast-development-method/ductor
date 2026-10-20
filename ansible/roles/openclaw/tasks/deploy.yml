@@ -1,0 +1,217 @@
+---
+- name: Resolve gateway deployment paths
+  ansible.builtin.set_fact:
+    ductor_gateway_dir: "{{ ductor_host.data_root }}/services/{{ ductor_service.id }}"
+    ductor_gateway_pool: "{{ ductor_config.incus.pools[ductor_service.required_pool] }}"
+    ductor_openclaw_bao_enabled: "{{ (ductor_service.provider_keys | default({}) | length > 0) or (ductor_service.openbao_service is defined) }}"
+    ductor_gateway_team_auth: "{{ ductor_service.team is defined }}"
+
+- name: Resolve scoped OpenBao service
+  ansible.builtin.set_fact:
+    ductor_openclaw_bao: "{{ ductor_config.services[ductor_service.openbao_service | default((ductor_config.services | dict2items | selectattr('value.kind', 'equalto', 'openbao') | selectattr('value.enabled', 'equalto', true) | map(attribute='key') | list | first))] }}"
+  when: ductor_openclaw_bao_enabled
+
+- name: Create gateway persistent directories
+  ansible.builtin.file:
+    path: "{{ ductor_gateway_dir }}/{{ item }}"
+    state: directory
+    owner: "{{ ductor_service.uid | default(1000) }}"
+    group: "{{ ductor_service.gid | default(1000) }}"
+    mode: "0700"
+  loop:
+    - state
+    - auth
+    - crabbox-state
+    - candidate
+    - secrets
+    - crabbox/config
+    - crabbox/bin
+    - "crabbox/incus/{{ ductor_service.required_pool }}/servercerts"
+
+- name: Create image build context
+  ansible.builtin.file:
+    path: "{{ ductor_gateway_dir }}/image"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Stage pinned gateway image recipe
+  ansible.builtin.copy:
+    src: "{{ ductor_bundle_root }}/service-images/openclaw/Dockerfile"
+    dest: "{{ ductor_gateway_dir }}/image/Dockerfile"
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Stage candidate gateway configuration
+  ansible.builtin.copy:
+    src: "{{ ductor_render_root }}/services/{{ ductor_service.id }}/openclaw.json"
+    dest: "{{ ductor_gateway_dir }}/candidate/openclaw.json"
+    owner: "{{ ductor_service.uid | default(1000) }}"
+    group: "{{ ductor_service.gid | default(1000) }}"
+    mode: "0600"
+  diff: false
+
+- name: Stage only managed company and agent instruction files
+  ansible.builtin.copy:
+    src: "{{ ductor_render_root }}/services/{{ ductor_service.id }}/state/"
+    dest: "{{ ductor_gateway_dir }}/state/"
+    owner: "{{ ductor_service.uid | default(1000) }}"
+    group: "{{ ductor_service.gid | default(1000) }}"
+    mode: "0600"
+    directory_mode: "0700"
+  diff: false
+
+- name: Stage activation instructions
+  ansible.builtin.copy:
+    src: "{{ ductor_render_root }}/services/{{ ductor_service.id }}/activation.json"
+    dest: "{{ ductor_gateway_dir }}/activation.json"
+    owner: "{{ ductor_service.uid | default(1000) }}"
+    group: "{{ ductor_service.gid | default(1000) }}"
+    mode: "0600"
+
+- name: Stage gateway token through a private file
+  ansible.builtin.copy:
+    src: "{{ ductor_service.gateway_token_file if ductor_service.gateway_token_file is defined else ductor_config.credentials.gateway_token_files[ductor_service.id] }}"
+    dest: "{{ ductor_gateway_dir }}/secrets/gateway-token"
+    owner: "{{ ductor_service.uid | default(1000) }}"
+    group: "{{ ductor_service.gid | default(1000) }}"
+    mode: "0400"
+  no_log: true
+  diff: false
+
+- name: Stage worker provider configuration
+  ansible.builtin.copy:
+    src: "{{ ductor_render_root }}/incus/{{ ductor_service.required_pool }}/crabbox.yaml"
+    dest: "{{ ductor_gateway_dir }}/crabbox/config/{{ ductor_service.required_pool }}.yaml"
+    owner: "{{ ductor_service.uid | default(1000) }}"
+    group: "{{ ductor_service.gid | default(1000) }}"
+    mode: "0400"
+  diff: false
+
+- name: Stage pool-specific Crabbox wrapper
+  ansible.builtin.copy:
+    src: "{{ ductor_render_root }}/incus/{{ ductor_service.required_pool }}/wrapper"
+    dest: "{{ ductor_gateway_dir }}/crabbox/bin/crabbox-{{ ductor_service.required_pool }}"
+    owner: "{{ ductor_service.uid | default(1000) }}"
+    group: "{{ ductor_service.gid | default(1000) }}"
+    mode: "0500"
+
+- name: Stage trusted Incus remote configuration
+  ansible.builtin.copy:
+    src: "{{ ductor_render_root }}/incus/{{ ductor_service.required_pool }}/incus-config.yml"
+    dest: "{{ ductor_gateway_dir }}/crabbox/incus/{{ ductor_service.required_pool }}/config.yml"
+    owner: "{{ ductor_service.uid | default(1000) }}"
+    group: "{{ ductor_service.gid | default(1000) }}"
+    mode: "0400"
+  diff: false
+
+- name: Stage restricted Incus client identity and server trust
+  ansible.builtin.copy:
+    src: "{{ item.source }}"
+    dest: "{{ ductor_gateway_dir }}/crabbox/incus/{{ ductor_service.required_pool }}/{{ item.destination }}"
+    owner: "{{ ductor_service.uid | default(1000) }}"
+    group: "{{ ductor_service.gid | default(1000) }}"
+    mode: "0400"
+  loop:
+    - source: "{{ ductor_gateway_pool.client_certificate_file }}"
+      destination: client.crt
+    - source: "{{ ductor_gateway_pool.client_key_file }}"
+      destination: client.key
+    - source: "{{ ductor_gateway_pool.server_certificate_file }}"
+      destination: "servercerts/{{ ductor_service.required_pool }}.crt"
+  no_log: true
+  diff: false
+
+- name: Render gateway Compose deployment
+  ansible.builtin.template:
+    src: compose.yaml.j2
+    dest: "{{ ductor_gateway_dir }}/compose.yaml"
+    owner: root
+    group: root
+    mode: "0600"
+  diff: false
+
+- name: Check Compose configuration
+  ansible.builtin.command:
+    argv: [docker, compose, --file, compose.yaml, config, --quiet]
+    chdir: "{{ ductor_gateway_dir }}"
+  changed_when: false
+
+- name: Build pinned gateway image
+  ansible.builtin.command:
+    argv: [docker, compose, --file, compose.yaml, build, --pull, gateway]
+    chdir: "{{ ductor_gateway_dir }}"
+  register: ductor_gateway_image_build
+  changed_when: true
+
+- name: Establish renewable credentials before checking enabled secret references
+  ansible.builtin.command:
+    argv: [docker, compose, --file, compose.yaml, up, --detach, --wait, --wait-timeout, '120', bao-agent]
+    chdir: "{{ ductor_gateway_dir }}"
+  changed_when: true
+  when: ductor_openclaw_bao_enabled
+
+- name: Validate candidate against the actual installed OpenClaw schema
+  ansible.builtin.command:
+    argv:
+      - docker
+      - compose
+      - --file
+      - compose.yaml
+      - run
+      - --rm
+      - --no-deps
+      - --entrypoint
+      - node
+      - --env
+      - OPENCLAW_CONFIG_PATH=/run/ductor-candidate/openclaw.json
+      - --env
+      - OPENCLAW_CONFIG_DIR=/run/ductor-candidate
+      - --env
+      - OPENCLAW_STATE_DIR=/tmp/ductor-preflight
+      - gateway
+      - dist/index.js
+      - config
+      - validate
+      - --json
+    chdir: "{{ ductor_gateway_dir }}"
+  changed_when: false
+  no_log: true
+
+- name: Verify plugin modules and declared dependencies load
+  ansible.builtin.command:
+    argv:
+      - docker
+      - compose
+      - --file
+      - compose.yaml
+      - run
+      - --rm
+      - --no-deps
+      - --entrypoint
+      - node
+      - --env
+      - OPENCLAW_CONFIG_PATH=/run/ductor-candidate/openclaw.json
+      - --env
+      - OPENCLAW_CONFIG_DIR=/run/ductor-candidate
+      - --env
+      - OPENCLAW_STATE_DIR=/tmp/ductor-preflight
+      - gateway
+      - dist/index.js
+      - plugins
+      - doctor
+      - --json
+    chdir: "{{ ductor_gateway_dir }}"
+  changed_when: false
+  no_log: true
+
+- name: Verify pinned Crabbox executable is installed
+  ansible.builtin.command:
+    argv: [docker, compose, --file, compose.yaml, run, --rm, --no-deps, --entrypoint, /usr/local/bin/crabbox, gateway, --version]
+    chdir: "{{ ductor_gateway_dir }}"
+  register: ductor_gateway_crabbox_version
+  changed_when: false
+  failed_when: ductor_gateway_crabbox_version.rc != 0 or '0.79.0' not in ductor_gateway_crabbox_version.stdout
+

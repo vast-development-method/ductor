@@ -1,0 +1,42 @@
+---
+- name: Check the installed service manifest
+  ansible.builtin.stat:
+    path: "{{ ductor_host.data_root }}/services/{{ ductor_service.id }}/compose.yaml"
+    follow: false
+  register: ductor_installed_manifest
+
+- name: Require an installed regular Compose manifest
+  ansible.builtin.assert:
+    that:
+      - ductor_installed_manifest.stat.exists
+      - ductor_installed_manifest.stat.isreg
+      - not ductor_installed_manifest.stat.islnk
+    fail_msg: Deploy this service before operating it.
+
+- name: Read service container status
+  ansible.builtin.command:
+    argv: [docker, compose, --file, '{{ ductor_host.data_root }}/services/{{ ductor_service.id }}/compose.yaml', ps, --all, --format, json]
+  register: ductor_service_status
+  changed_when: false
+  when: ductor_action == 'status'
+
+- name: Show selected service status
+  ansible.builtin.debug:
+    msg: "{{ ductor_service_status.stdout_lines }}"
+  when: ductor_action == 'status'
+
+- name: Restart the independently managed service
+  ansible.builtin.command:
+    argv: [docker, compose, --file, '{{ ductor_host.data_root }}/services/{{ ductor_service.id }}/compose.yaml', restart, --timeout, '60']
+  changed_when: true
+  when: ductor_action == 'restart'
+
+- name: Wait for the restarted service health checks
+  ansible.builtin.command:
+    argv: [docker, compose, --file, '{{ ductor_host.data_root }}/services/{{ ductor_service.id }}/compose.yaml', up, --detach, --no-build, --pull, never, --wait, --wait-timeout, '180']
+  changed_when: false
+  when: ductor_action == 'restart'
+
+- name: Create a consistent service backup
+  ansible.builtin.include_tasks: backup.yml
+  when: ductor_action == 'backup'

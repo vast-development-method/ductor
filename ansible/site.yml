@@ -1,0 +1,68 @@
+---
+- name: Validate or reconcile service hosts through SSH
+  hosts: ductor_hosts
+  gather_facts: false
+  any_errors_fatal: true
+  tasks:
+    - name: Require the supported deployment action
+      ansible.builtin.assert:
+        that:
+          - ductor_action in ['preflight', 'deploy', 'update', 'activate', 'bootstrap-workers']
+          - ansible_connection == 'ssh'
+        fail_msg: Ductor only deploys through SSH; unsupported deployment action.
+    - name: Validate and prepare host prerequisites
+      ansible.builtin.include_role:
+        name: host
+      when: ductor_action != 'activate'
+
+- name: Reconcile OpenBao before dependent gateways
+  hosts: ductor_hosts
+  gather_facts: false
+  any_errors_fatal: true
+  serial: 1
+  tasks:
+    - name: Configure the selected OpenBao service
+      ansible.builtin.include_role:
+        name: openbao
+      loop: "{{ ductor_services | selectattr('kind', 'equalto', 'openbao') | list }}"
+      loop_control:
+        loop_var: ductor_service
+        label: "{{ ductor_service.id }}"
+      when: ductor_action in ['preflight', 'deploy', 'update']
+
+- name: Reconcile independent Incus worker projects
+  hosts: ductor_hosts
+  gather_facts: false
+  any_errors_fatal: true
+  tasks:
+    - name: Configure approved worker pools
+      ansible.builtin.include_role:
+        name: incus
+      when:
+        - ductor_pools | length > 0
+        - ductor_action != 'activate'
+
+- name: Reconcile OpenClaw gateways
+  hosts: ductor_hosts
+  gather_facts: false
+  any_errors_fatal: true
+  serial: 1
+  tasks:
+    - name: Prepare the gateway credential agent
+      ansible.builtin.include_role:
+        name: bao_agent
+      loop: "{{ ductor_services | selectattr('kind', 'equalto', 'openclaw') | list }}"
+      loop_control:
+        loop_var: ductor_service
+        label: "{{ ductor_service.id }}"
+      when:
+        - ductor_action in ['preflight', 'deploy', 'update']
+        - (ductor_service.provider_keys | default({}) | length > 0) or (ductor_service.openbao_service is defined)
+    - name: Configure the selected OpenClaw gateway
+      ansible.builtin.include_role:
+        name: openclaw
+      loop: "{{ ductor_services | selectattr('kind', 'equalto', 'openclaw') | list }}"
+      loop_control:
+        loop_var: ductor_service
+        label: "{{ ductor_service.id }}"
+      when: ductor_action in ['preflight', 'deploy', 'update', 'activate']

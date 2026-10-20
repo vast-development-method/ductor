@@ -5,3 +5,10 @@
 *.pem
 *.key
 bao-init*.json
+
+__pycache__/
+*.py[cod]
+.venv/
+.ci-venv/
+rendered/
+config.json

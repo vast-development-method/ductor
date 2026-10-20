@@ -1,30 +1,51 @@
-name: Ductor container
+name: Ductor distribution
 
 on:
   pull_request:
   push:
     branches: [main, 'feature/**']
-    tags: ['v[0-9]*.[0-9]*.[0-9]*']
+    tags: ['v2.*']
 
 permissions:
   contents: read
 
 concurrency:
-  group: container-${{ github.ref }}
+  group: distribution-${{ github.ref }}
   cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
 
 jobs:
   checks:
-    name: Validate standalone runtime before image publication
+    name: Validate controller and standalone installer
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-      - name: Install test dependencies
-        run: sudo apt-get update && sudo apt-get install -y shellcheck jq openssl openssh-client ripgrep
-      - name: Run complete offline suite
-        run: sudo env "PATH=$PATH" bash tests/run.sh
+      - name: Install controller dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y python3-venv shellcheck
+          python3 -m venv .ci-venv
+          .ci-venv/bin/python -m pip install -r requirements-controller.txt
+          echo "$PWD/.ci-venv/bin" >> "$GITHUB_PATH"
+      - name: Run the offline controller suite
+        run: bash tests/run.sh
+      - name: Validate distribution shell
+        run: shellcheck install.sh src/ductor
+      - name: Exercise the real standalone installer
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          version=$(cat VERSION)
+          archive="$RUNNER_TEMP/ductor-$version.tar.gz"
+          git archive --format=tar.gz --prefix="ductor-$version/" HEAD > "$archive"
+          sha=$(sha256sum "$archive")
+          bash install.sh --version "$version" --bundle "$archive" --sha256 "${sha%% *}" \
+            --prefix "$RUNNER_TEMP/ductor-install" --bin-dir "$RUNNER_TEMP/ductor-bin"
+          test "$("$RUNNER_TEMP/ductor-bin/ductor" --version)" = "$version"
+          "$RUNNER_TEMP/ductor-bin/ductor" --help
+          test ! -e "$RUNNER_TEMP/ductor-install/current/.git"
+
   image:
-    name: Build and exercise ${{ matrix.arch }} image
+    name: Build and exercise ${{ matrix.arch }} controller
     needs: checks
     strategy:
       fail-fast: false
@@ -44,7 +65,7 @@ jobs:
       version: ${{ steps.release.outputs.version }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-      - name: Validate release identity
+      - name: Validate the release identity
         id: release
         env:
           REF_TYPE: ${{ github.ref_type }}
@@ -52,16 +73,13 @@ jobs:
         shell: bash
         run: |
           set -Eeuo pipefail
-          version=$(bash src/ductor version)
-          version=${version#Ductor }
-          [[ $version =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z]+([.-][0-9A-Za-z]+)*)?$ ]]
+          version=$(cat VERSION)
+          [[ $version =~ ^2\.[0-9]+\.[0-9]+(-[0-9A-Za-z]+([.-][0-9A-Za-z]+)*)?$ ]]
           if [[ $REF_TYPE == tag ]]; then
-            [[ $REF_NAME == "v$version" ]] || { echo 'Tag must match the version embedded in src/ductor.' >&2; exit 1; }
-          elif [[ $REF_NAME == feature/ductor-bootstrap ]]; then
-            [[ $version == *-* ]] || { echo 'Bootstrap branch publication requires a prerelease version.' >&2; exit 1; }
+            [[ $REF_NAME == "v$version" ]] || { echo 'Tag must match VERSION.' >&2; exit 1; }
           fi
           printf 'version=%s\n' "$version" >> "$GITHUB_OUTPUT"
-      - name: Build native image
+      - name: Build the native image
         env:
           VERSION: ${{ steps.release.outputs.version }}
           REVISION: ${{ github.sha }}
@@ -69,10 +87,21 @@ jobs:
           docker build --pull --build-arg "DUCTOR_VERSION=$VERSION" \
             --build-arg "VCS_REF=$REVISION" --build-arg "BUILD_DATE=$(date -u +%FT%TZ)" \
             --tag ductor:ci .
-      - name: Exercise real container lifecycle
-        run: bash tests/container-image.sh ductor:ci
-      - name: Publish tested architecture
-        if: github.repository == 'vast-development-method/ductor' && github.event_name == 'push' && (github.ref_type == 'tag' || github.ref == 'refs/heads/feature/ductor-bootstrap')
+      - name: Exercise the controller without daemon access
+        env:
+          VERSION: ${{ steps.release.outputs.version }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          options=(--rm --read-only --cap-drop ALL --security-opt no-new-privileges:true --tmpfs /tmp:rw,nosuid,nodev,size=128m)
+          test "$(docker run "${options[@]}" ductor:ci --version)" = "$VERSION"
+          docker run "${options[@]}" ductor:ci --help
+          docker run "${options[@]}" --entrypoint /bin/sh ductor:ci -ec 'test ! -e /var/run/docker.sock; ! command -v docker; ! command -v incus; ! command -v sshd; ansible-playbook --version'
+          mkdir -p "$RUNNER_TEMP/state" "$RUNNER_TEMP/inputs"
+          DUCTOR_STATE_PATH="$RUNNER_TEMP/state" DUCTOR_INPUTS_PATH="$RUNNER_TEMP/inputs" \
+            docker compose -f compose.ductor.yaml config --quiet
+      - name: Publish the tested architecture on an explicit release tag
+        if: github.repository == 'vast-development-method/ductor' && github.event_name == 'push' && github.ref_type == 'tag'
         env:
           GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GHCR_USER: ${{ github.actor }}
@@ -84,34 +113,41 @@ jobs:
           docker tag ductor:ci "$IMAGE:sha-$REVISION-$ARCH"
           docker push "$IMAGE:sha-$REVISION-$ARCH"
 
-  publish:
-    name: Publish versioned multi-architecture image
+  release:
+    name: Publish versioned image and standalone bundle
     needs: image
-    if: github.repository == 'vast-development-method/ductor' && github.event_name == 'push' && (github.ref_type == 'tag' || github.ref == 'refs/heads/feature/ductor-bootstrap')
+    if: github.repository == 'vast-development-method/ductor' && github.event_name == 'push' && github.ref_type == 'tag'
     runs-on: ubuntu-24.04
     permissions:
-      contents: read
+      contents: write
       packages: write
     env:
       IMAGE: ghcr.io/vast-development-method/ductor
       VERSION: ${{ needs.image.outputs.version }}
       REVISION: ${{ github.sha }}
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
-      - name: Publish manifest only after both architecture tests pass
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Publish the tested multi-architecture manifest
         env:
-          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GHCR_USER: ${{ github.actor }}
         shell: bash
         run: |
           set -Eeuo pipefail
-          version=$VERSION
-          [[ $version =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z]+([.-][0-9A-Za-z]+)*)?$ ]]
-          printf '%s' "$GHCR_TOKEN" | docker login ghcr.io --username "$GHCR_USER" --password-stdin
+          printf '%s' "$GH_TOKEN" | docker login ghcr.io --username "$GHCR_USER" --password-stdin
           trap 'docker logout ghcr.io' EXIT
-          tags=(--tag "$IMAGE:$version" --tag "$IMAGE:sha-$REVISION")
-          if [[ $version != *-* ]]; then
-            tags+=(--tag "$IMAGE:latest" --tag "$IMAGE:${version%.*}")
-          fi
-          docker buildx imagetools create "${tags[@]}" "$IMAGE:sha-$REVISION-amd64" "$IMAGE:sha-$REVISION-arm64"
-          docker buildx imagetools inspect "$IMAGE:$version"
-          printf 'Published `%s:%s` for Linux amd64 and arm64.\n' "$IMAGE" "$version" >> "$GITHUB_STEP_SUMMARY"
+          docker buildx imagetools create --tag "$IMAGE:$VERSION" --tag "$IMAGE:sha-$REVISION" \
+            "$IMAGE:sha-$REVISION-amd64" "$IMAGE:sha-$REVISION-arm64"
+          docker buildx imagetools inspect "$IMAGE:$VERSION"
+      - name: Publish the immutable standalone release bundle
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          archive="ductor-$VERSION.tar.gz"
+          git archive --format=tar.gz --prefix="ductor-$VERSION/" HEAD > "$archive"
+          sha256sum "$archive" > "$archive.sha256"
+          prerelease=()
+          if [[ $VERSION == *-* ]]; then prerelease=(--prerelease); fi
+          gh release create "v$VERSION" --verify-tag --title "Ductor $VERSION" \
+            --generate-notes "${prerelease[@]}" "$archive" "$archive.sha256" install.sh
+          printf 'Published `%s:%s` for Linux amd64/arm64 and the checksum-verified standalone bundle.\n' "$IMAGE" "$VERSION" >> "$GITHUB_STEP_SUMMARY"

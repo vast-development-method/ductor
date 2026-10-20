@@ -1,0 +1,57 @@
+---
+- name: Select OpenBao service paths
+  ansible.builtin.set_fact:
+    bao_service_root: "{{ ductor_host.data_root }}/services/{{ ductor_service.id }}"
+    bao_uid: "{{ ductor_service.uid | default(1000) }}"
+    bao_gid: "{{ ductor_service.gid | default(1000) }}"
+
+- name: Validate supported OpenBao operation
+  ansible.builtin.assert:
+    that:
+      - ductor_action in ['preflight', 'deploy', 'update', 'status', 'restart', 'backup']
+      - ductor_service.bind_address | default('127.0.0.1') == '127.0.0.1'
+    fail_msg: "OpenBao requires an operator TLS proxy and a supported lifecycle action."
+
+- name: Verify remote Docker Compose
+  ansible.builtin.command:
+    argv: [docker, compose, version]
+  changed_when: false
+
+- name: Install OpenBao desired state
+  ansible.builtin.include_tasks: deploy.yml
+  when: ductor_action in ['deploy', 'update']
+
+- name: Report native OpenBao state including sealed servers
+  ansible.builtin.command:
+    argv: [docker, compose, --file, "{{ bao_service_root }}/compose.yaml", exec, -T, openbao, bao, status, -format=json]
+  register: bao_status
+  changed_when: false
+  failed_when: bao_status.rc not in ([0, 2] if ductor_action == 'status' else [0])
+  when: ductor_action in ['status', 'preflight']
+
+- name: Require reachable verified HTTPS ingress for OpenBao preflight
+  ansible.builtin.uri:
+    url: "{{ ductor_service.url | regex_replace('/$', '') }}/v1/sys/health"
+    validate_certs: true
+    ca_path: "{{ ductor_service.ca_file | default(omit) }}"
+    status_code: [200]
+    follow_redirects: none
+    return_content: false
+    timeout: 10
+  delegate_to: localhost
+  become: false
+  when: ductor_action == 'preflight'
+
+- name: Present OpenBao status
+  ansible.builtin.debug:
+    msg: "{{ bao_status.stdout | from_json }}"
+  when: ductor_action == 'status'
+
+- name: Restart OpenBao with the selected native seal behavior
+  ansible.builtin.command:
+    argv: [docker, compose, --file, "{{ bao_service_root }}/compose.yaml", restart, openbao]
+  when: ductor_action == 'restart'
+
+- name: Save a native Raft snapshot
+  ansible.builtin.include_tasks: backup.yml
+  when: ductor_action == 'backup'

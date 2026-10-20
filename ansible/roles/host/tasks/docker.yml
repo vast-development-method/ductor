@@ -1,0 +1,66 @@
+---
+- name: Inspect installed packages before a fresh engine installation
+  ansible.builtin.package_facts:
+    manager: apt
+
+- name: Refuse to replace a stopped or conflicting existing engine
+  ansible.builtin.assert:
+    that:
+      - "'docker-ce' not in ansible_facts.packages"
+      - "'docker.io' not in ansible_facts.packages"
+      - "'podman-docker' not in ansible_facts.packages"
+    fail_msg: An existing container engine is unavailable. Repair or replace it explicitly before deployment.
+
+- name: Install repository prerequisites
+  ansible.builtin.apt:
+    name: [ca-certificates, python3-apt]
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+
+- name: Create the apt signing-key directory
+  ansible.builtin.file:
+    path: /etc/apt/keyrings
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
+
+- name: Fetch the official Docker repository key over verified TLS
+  ansible.builtin.get_url:
+    url: "https://download.docker.com/linux/{{ ansible_facts.distribution | lower }}/gpg"
+    dest: /etc/apt/keyrings/docker.asc
+    owner: root
+    group: root
+    mode: '0644'
+    validate_certs: true
+
+- name: Configure only the official signed Docker repository
+  ansible.builtin.copy:
+    dest: /etc/apt/sources.list.d/ductor-docker.list
+    owner: root
+    group: root
+    mode: '0644'
+    content: >-
+      deb [arch={{ 'amd64' if ansible_facts.architecture == 'x86_64' else 'arm64' }} signed-by=/etc/apt/keyrings/docker.asc]
+      https://download.docker.com/linux/{{ ansible_facts.distribution | lower }}
+      {{ ansible_facts.distribution_release }} stable
+
+- name: Install the pinned engine and Compose plugin
+  ansible.builtin.apt:
+    name:
+      - "docker-ce=5:{{ ductor_docker_engine_version }}-1~{{ ansible_facts.distribution | lower }}.{{ ductor_docker_os_version }}~{{ ansible_facts.distribution_release }}"
+      - "docker-ce-cli=5:{{ ductor_docker_engine_version }}-1~{{ ansible_facts.distribution | lower }}.{{ ductor_docker_os_version }}~{{ ansible_facts.distribution_release }}"
+      - "docker-compose-plugin={{ ductor_docker_compose_version }}-1~{{ ansible_facts.distribution | lower }}.{{ ductor_docker_os_version }}~{{ ansible_facts.distribution_release }}"
+    state: present
+    update_cache: true
+    allow_downgrade: false
+    install_recommends: false
+  vars:
+    ductor_docker_os_version: "{{ ansible_facts.distribution_version if ansible_facts.distribution == 'Ubuntu' else ansible_facts.distribution_major_version }}"
+
+- name: Start the independently managed Docker service
+  ansible.builtin.systemd_service:
+    name: docker
+    enabled: true
+    state: started

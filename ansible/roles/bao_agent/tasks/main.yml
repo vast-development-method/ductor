@@ -1,0 +1,90 @@
+---
+- name: Select the gateway OpenBao service
+  ansible.builtin.set_fact:
+    gateway_bao_candidates: "{{ ductor_config.services | dict2items | selectattr('value.kind', 'equalto', 'openbao') | list }}"
+    gateway_root: "{{ ductor_host.data_root }}/services/{{ ductor_service.id }}"
+
+- name: Resolve the gateway secret server
+  ansible.builtin.set_fact:
+    gateway_bao: "{{ ductor_config.services[ductor_service.openbao_service] if ductor_service.openbao_service is defined else gateway_bao_candidates[0].value }}"
+    gateway_bao_refs: "{{ (ductor_config.credentials | default({})).get('openbao_approles', {}).get(ductor_service.id, {}) }}"
+
+- name: Require provisioned per-gateway AppRole references
+  ansible.builtin.assert:
+    that:
+      - gateway_bao_refs.role_id_file is defined
+      - gateway_bao_refs.secret_id_file is defined
+    fail_msg: "Provision this gateway AppRole with the provision-credentials action before deploying its secret agent."
+
+- name: Inspect controller credential files without disclosing contents
+  ansible.builtin.stat:
+    path: "{{ item }}"
+    follow: false
+  delegate_to: localhost
+  become: false
+  register: gateway_bao_ref_stats
+  loop: ["{{ gateway_bao_refs.role_id_file }}", "{{ gateway_bao_refs.secret_id_file }}"]
+  no_log: true
+
+- name: Reject absent or unprotected AppRole references
+  ansible.builtin.assert:
+    that:
+      - item.stat.exists
+      - item.stat.isreg
+      - not item.stat.islnk
+      - item.stat.nlink == 1
+      - item.stat.mode in ['0400', '0600']
+    fail_msg: "AppRole reference must be an existing private regular file (0400 or 0600)."
+  loop: "{{ gateway_bao_ref_stats.results }}"
+  no_log: true
+
+- name: Create secret-agent directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: "{{ ductor_service.uid | default(1000) }}"
+    group: "{{ ductor_service.gid | default(1000) }}"
+    mode: '0700'
+  loop:
+    - "{{ gateway_root }}/bao-auth"
+    - "/run/ductor/{{ ductor_service.id }}/bao"
+  when: ductor_action in ['deploy', 'update']
+
+- name: Restore ephemeral token directory at boot independently of Ductor
+  ansible.builtin.copy:
+    dest: "/etc/tmpfiles.d/ductor-bao-{{ ductor_service.id }}.conf"
+    content: "d /run/ductor/{{ ductor_service.id }}/bao 0700 {{ ductor_service.uid | default(1000) }} {{ ductor_service.gid | default(1000) }} -\n"
+    mode: '0644'
+  when: ductor_action in ['deploy', 'update']
+
+- name: Install native OpenBao Agent configuration
+  ansible.builtin.copy:
+    src: "{{ ductor_render_root }}/services/{{ ductor_service.id }}/agent.hcl"
+    dest: "{{ gateway_root }}/agent.hcl"
+    owner: "{{ ductor_service.uid | default(1000) }}"
+    group: "{{ ductor_service.gid | default(1000) }}"
+    mode: '0600'
+  when: ductor_action in ['deploy', 'update']
+
+- name: Install native AppRole credential files
+  ansible.builtin.copy:
+    src: "{{ item.source }}"
+    dest: "{{ gateway_root }}/bao-auth/{{ item.name }}"
+    owner: "{{ ductor_service.uid | default(1000) }}"
+    group: "{{ ductor_service.gid | default(1000) }}"
+    mode: '0400'
+  loop:
+    - {source: "{{ gateway_bao_refs.role_id_file }}", name: role-id}
+    - {source: "{{ gateway_bao_refs.secret_id_file }}", name: secret-id}
+  no_log: true
+  diff: false
+  when: ductor_action in ['deploy', 'update']
+
+- name: Install operator-provided OpenBao CA bundle
+  ansible.builtin.copy:
+    src: "{{ gateway_bao.ca_file }}"
+    dest: "{{ gateway_root }}/bao-ca.pem"
+    owner: "{{ ductor_service.uid | default(1000) }}"
+    group: "{{ ductor_service.gid | default(1000) }}"
+    mode: '0600'
+  when: ductor_action in ['deploy', 'update'] and gateway_bao.ca_file is defined

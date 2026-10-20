@@ -1,0 +1,40 @@
+---
+# Native Incus split export files; do not unpack or execute artifact contents.
+- name: Create approved image artifact cache
+  ansible.builtin.file:
+    path: "/var/cache/ductor/images/{{ ductor_pool.image_fingerprint }}"
+    state: directory
+    owner: root
+    group: root
+    mode: '0700'
+
+- name: Download and verify image metadata archive
+  ansible.builtin.get_url:
+    url: "{{ ductor_pool.image_import.metadata_url }}"
+    checksum: "sha256:{{ ductor_pool.image_import.metadata_sha256 }}"
+    dest: "/var/cache/ductor/images/{{ ductor_pool.image_fingerprint }}/metadata.tar.xz"
+    owner: root
+    group: root
+    mode: '0600'
+    timeout: 120
+
+- name: Download and verify VM root disk
+  ansible.builtin.get_url:
+    url: "{{ ductor_pool.image_import.disk_url }}"
+    checksum: "sha256:{{ ductor_pool.image_import.disk_sha256 }}"
+    dest: "/var/cache/ductor/images/{{ ductor_pool.image_fingerprint }}/disk.qcow2"
+    owner: root
+    group: root
+    mode: '0600'
+    timeout: 120
+
+- name: Import the pinned native Incus image
+  ansible.builtin.command:
+    argv: [incus, image, import, "/var/cache/ductor/images/{{ ductor_pool.image_fingerprint }}/metadata.tar.xz", "/var/cache/ductor/images/{{ ductor_pool.image_fingerprint }}/disk.qcow2", --project, "{{ ductor_pool.image_source_project }}"]
+
+- name: Verify the imported image by its approved immutable fingerprint
+  ansible.builtin.command:
+    argv: [incus, image, list, "{{ ductor_pool.image_fingerprint }}", --project, "{{ ductor_pool.image_source_project }}", --format, json]
+  register: ductor_source_image
+  changed_when: false
+  check_mode: false

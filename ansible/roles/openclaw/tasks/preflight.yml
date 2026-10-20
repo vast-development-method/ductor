@@ -1,0 +1,17 @@
+---
+- name: Inspect the existing gateway Compose path
+  ansible.builtin.stat:
+    path: "{{ ductor_gateway_dir }}/compose.yaml"
+  register: ductor_gateway_existing
+
+- name: Validate existing Compose syntax when deployed
+  ansible.builtin.command:
+    argv: [docker, compose, --file, compose.yaml, config, --quiet]
+    chdir: "{{ ductor_gateway_dir }}"
+  when: ductor_gateway_existing.stat.exists
+  changed_when: false
+
+- name: Explain first deployment readiness scope
+  ansible.builtin.debug:
+    msg: "{{ ductor_service.id }} is not yet deployed. Preflight checks prerequisites; deployment validates the actual image and configuration before activation."
+  when: not ductor_gateway_existing.stat.exists

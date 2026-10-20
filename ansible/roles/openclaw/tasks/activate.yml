@@ -1,0 +1,118 @@
+---
+- name: Load the non-secret generated activation contract
+  ansible.builtin.set_fact:
+    ductor_activation: "{{ lookup('ansible.builtin.file', ductor_render_root ~ '/services/' ~ ductor_service.id ~ '/activation.json') | from_json }}"
+    ductor_auth_ready: true
+
+- name: Check staged activation contract fingerprints
+  ansible.builtin.stat:
+    path: "{{ ductor_gateway_dir }}/{{ item }}"
+    checksum_algorithm: sha256
+  loop: [candidate/openclaw.json, activation.json]
+  register: ductor_staged_activation
+
+- name: Check desired activation contract fingerprints
+  ansible.builtin.stat:
+    path: "{{ ductor_render_root }}/services/{{ ductor_service.id }}/{{ item }}"
+    checksum_algorithm: sha256
+  loop: [openclaw.json, activation.json]
+  delegate_to: localhost
+  become: false
+  register: ductor_desired_activation
+
+- name: Require activation to use the staged validated desired configuration
+  ansible.builtin.assert:
+    that:
+      - ductor_staged_activation.results[0].stat.exists
+      - ductor_staged_activation.results[1].stat.exists
+      - ductor_staged_activation.results[0].stat.checksum == ductor_desired_activation.results[0].stat.checksum
+      - ductor_staged_activation.results[1].stat.checksum == ductor_desired_activation.results[1].stat.checksum
+    fail_msg: "Desired gateway configuration changed since deployment. Run Ductor deploy to stage and validate it before activation."
+
+- name: Stop gateway to acquire exclusive native maintenance ownership
+  ansible.builtin.command:
+    argv: [docker, compose, --file, compose.yaml, stop, --timeout, '30', gateway]
+    chdir: "{{ ductor_gateway_dir }}"
+  changed_when: true
+
+- name: Restore validated account policy after interactive login
+  ansible.builtin.copy:
+    src: "{{ ductor_gateway_dir }}/candidate/openclaw.json"
+    dest: "{{ ductor_gateway_dir }}/state/openclaw.json"
+    remote_src: true
+    owner: "{{ ductor_service.uid | default(1000) }}"
+    group: "{{ ductor_service.gid | default(1000) }}"
+    mode: "0600"
+    backup: true
+  diff: false
+
+- name: Apply native backed-up state migrations before credential admission
+  ansible.builtin.command:
+    argv: [docker, compose, --file, compose.yaml, run, --rm, --no-deps, --entrypoint, node, gateway, dist/index.js, doctor, --fix, --non-interactive]
+    chdir: "{{ ductor_gateway_dir }}"
+  changed_when: true
+  no_log: true
+
+- name: Preserve declared account policy after native legacy migration
+  ansible.builtin.copy:
+    src: "{{ ductor_gateway_dir }}/candidate/openclaw.json"
+    dest: "{{ ductor_gateway_dir }}/state/openclaw.json"
+    remote_src: true
+    owner: "{{ ductor_service.uid | default(1000) }}"
+    group: "{{ ductor_service.gid | default(1000) }}"
+    mode: "0600"
+  diff: false
+
+- name: Inspect actual enrolled account inventory
+  ansible.builtin.command:
+    argv: "{{ ['docker', 'compose', '--file', 'compose.yaml', 'run', '--rm', '--no-deps', '--entrypoint', 'node', 'gateway', 'dist/index.js', 'models', 'auth', 'list', '--agent', item.agent, '--provider', item.provider, '--json'] }}"
+    chdir: "{{ ductor_gateway_dir }}"
+  loop: "{{ ductor_activation.enrollment }}"
+  register: ductor_enrolled_accounts
+  changed_when: false
+  no_log: true
+
+- name: Require the exact declared account and reject additional visible provider accounts
+  ansible.builtin.set_fact:
+    ductor_auth_ready: "{{ ductor_auth_ready and ((item.stdout | from_json).profiles | length == 1) and ((item.stdout | from_json).profiles | selectattr('id', 'equalto', item.item.profile) | selectattr('provider', 'equalto', item.item.provider) | selectattr('type', 'equalto', item.item.mode) | list | length == 1) }}"
+  loop: "{{ ductor_enrolled_accounts.results }}"
+  no_log: true
+
+- name: Refuse startup until the intended model account is enrolled
+  ansible.builtin.assert:
+    that: ductor_auth_ready
+    fail_msg: "Gateway remains stopped. Enroll the declared model account using Ductor login, remove any additional same-provider accounts from this Gateway, then run Ductor activate. See activation.json for required agent/profile ids."
+
+- name: Apply exact native account routing policy
+  ansible.builtin.command:
+    argv: "{{ ['docker', 'compose', '--file', 'compose.yaml', 'run', '--rm', '--no-deps', '--entrypoint', 'node', 'gateway', 'dist/index.js'] + item }}"
+    chdir: "{{ ductor_gateway_dir }}"
+  loop: "{{ ductor_activation.auth_order_commands }}"
+  changed_when: true
+  no_log: true
+
+- name: Require native configuration and model credential readiness
+  ansible.builtin.command:
+    argv: "{{ ['docker', 'compose', '--file', 'compose.yaml', 'run', '--rm', '--no-deps', '--entrypoint', 'node', 'gateway', 'dist/index.js'] + item }}"
+    chdir: "{{ ductor_gateway_dir }}"
+  loop: "{{ ductor_activation.verification_commands }}"
+  changed_when: false
+  no_log: true
+
+- name: Initialize ingest compile and check durable company knowledge
+  ansible.builtin.command:
+    argv: "{{ ['docker', 'compose', '--file', 'compose.yaml', 'run', '--rm', '--no-deps', '--entrypoint', 'node', 'gateway', 'dist/index.js'] + item }}"
+    chdir: "{{ ductor_gateway_dir }}"
+  loop: "{{ ductor_activation.knowledge_commands }}"
+  changed_when: true
+  no_log: true
+
+- name: Start gateway and require startup admission health
+  ansible.builtin.command:
+    argv: [docker, compose, --file, compose.yaml, up, --detach, --wait, --wait-timeout, '180']
+    chdir: "{{ ductor_gateway_dir }}"
+  changed_when: true
+
+- name: Report completed activation and remaining live acceptance
+  ansible.builtin.debug:
+    msg: "{{ ductor_service.id }} passed native configuration, enrolled account, model readiness, knowledge, and startup checks. Provider inference, VM lifecycle, reviewer flow, ingress identity, and restore still require the documented live acceptance checks."

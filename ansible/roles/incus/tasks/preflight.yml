@@ -1,0 +1,75 @@
+---
+- name: Require the deployed project with exact desired quota settings
+  ansible.builtin.assert:
+    that:
+      - ductor_existing_project | length == 1
+      - (ductor_existing_project[0].config | combine(ductor_desired_project.config)) == ductor_existing_project[0].config
+    fail_msg: "Worker project is absent or its quotas/restrictions have drifted. Run the reviewed deploy; preflight never creates or repairs resources."
+
+- name: Read the deployed worker profiles
+  ansible.builtin.command:
+    argv: [incus, profile, list, --project, "{{ ductor_pool.project }}", --format, json]
+  register: ductor_preflight_profiles
+  changed_when: false
+  check_mode: false
+
+- name: Resolve the deployed worker profile
+  ansible.builtin.set_fact:
+    ductor_preflight_profile: "{{ ductor_preflight_profiles.stdout | from_json | selectattr('name', 'equalto', ductor_pool.profile) | list }}"
+
+- name: Require the exact per-instance shape and network policy
+  ansible.builtin.assert:
+    that:
+      - ductor_preflight_profile | length == 1
+      - ductor_preflight_profile[0].config == ductor_desired_profile.config
+      - ductor_preflight_profile[0].devices == ductor_desired_profile.devices
+    fail_msg: "Worker profile is absent or differs from the approved CPU, RAM, root disk and network policy."
+
+- name: Read the deployed image aliases
+  ansible.builtin.command:
+    argv: [incus, image, alias, list, --project, "{{ ductor_pool.project }}", --format, json]
+  register: ductor_preflight_aliases
+  changed_when: false
+  check_mode: false
+
+- name: Resolve the approved deployed image alias
+  ansible.builtin.set_fact:
+    ductor_preflight_alias: "{{ ductor_preflight_aliases.stdout | from_json | selectattr('name', 'equalto', 'ductor-' + ductor_pool.image_fingerprint) | list }}"
+
+- name: Require the approved deployed image identity
+  ansible.builtin.assert:
+    that:
+      - ductor_preflight_alias | length == 1
+      - ductor_preflight_alias[0].target == ductor_pool.image_fingerprint
+    fail_msg: "Approved image is not deployed or its immutable alias has changed."
+
+- name: Identify the configured runtime public certificate without creating files
+  ansible.builtin.command:
+    argv: [openssl, x509, -noout, -fingerprint, -sha256]
+    stdin: "{{ lookup('ansible.builtin.file', ductor_pool.client_certificate_file) }}"
+  register: ductor_preflight_fingerprint
+  changed_when: false
+  check_mode: false
+  no_log: true
+
+- name: Read deployed runtime client trust
+  ansible.builtin.command:
+    argv: [incus, config, trust, list, --format, json]
+  register: ductor_preflight_trust
+  changed_when: false
+  check_mode: false
+  no_log: true
+
+- name: Resolve the configured runtime identity
+  ansible.builtin.set_fact:
+    ductor_preflight_identity: "{{ ductor_preflight_trust.stdout | from_json | selectattr('fingerprint', 'equalto', ductor_preflight_fingerprint.stdout.split('=')[-1] | replace(':', '') | lower | trim) | list }}"
+  no_log: true
+
+- name: Require project-restricted runtime authority
+  ansible.builtin.assert:
+    that:
+      - ductor_preflight_identity | length == 1
+      - ductor_preflight_identity[0].restricted
+      - ductor_preflight_identity[0].projects == [ductor_pool.project]
+    fail_msg: "Runtime certificate is not enrolled exclusively in its approved worker project."
+  no_log: true
