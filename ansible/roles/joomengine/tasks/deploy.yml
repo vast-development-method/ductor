@@ -1,0 +1,129 @@
+---
+- name: Inspect an existing service definition before claiming its directory
+  ansible.builtin.stat:
+    path: "{{ ductor_joomengine_root }}/compose.yaml"
+    follow: false
+  register: ductor_joomengine_prior_manifest
+
+- name: Read the previous service identity
+  ansible.builtin.slurp:
+    src: "{{ ductor_joomengine_root }}/compose.yaml"
+  register: ductor_joomengine_prior_definition
+  when: ductor_joomengine_prior_manifest.stat.exists
+
+- name: Refuse to replace a different service with a Joomla deployment
+  ansible.builtin.assert:
+    that:
+      - (ductor_joomengine_prior_definition.content | b64decode | from_json).name == 'ductor-' ~ ductor_service.id
+      - ((ductor_joomengine_prior_definition.content | b64decode | from_json).services.keys() | list | sort) == ['database', 'joomla']
+    fail_msg: This directory belongs to another service. Choose a new service ID and migrate data explicitly.
+  when: ductor_joomengine_prior_manifest.stat.exists
+
+- name: Prepare root-owned configuration and persistent storage
+  ansible.builtin.file:
+    path: "{{ ductor_joomengine_root }}/{{ item }}"
+    state: directory
+    owner: root
+    group: root
+    mode: '0700'
+  loop: ['', secrets, bootstrap, client]
+
+- name: Inspect persistent directories without changing live ownership
+  ansible.builtin.stat:
+    path: "{{ ductor_joomengine_root }}/{{ item }}"
+    follow: false
+  loop: [database, joomla]
+  register: ductor_joomengine_data_directories
+
+- name: Create only missing persistent directories
+  ansible.builtin.file:
+    path: "{{ ductor_joomengine_root }}/{{ item.item }}"
+    state: directory
+    owner: root
+    group: root
+    mode: '0700'
+  loop: "{{ ductor_joomengine_data_directories.results }}"
+  when: not item.stat.exists
+
+- name: Prepare the independent MCP artifact directory
+  ansible.builtin.file:
+    path: "{{ ductor_joomengine_root }}/artifacts"
+    state: directory
+    owner: '33'
+    group: '33'
+    mode: '0700'
+
+- name: Check deployed credentials before updating configuration
+  ansible.builtin.stat:
+    path: "{{ ductor_joomengine_root }}/secrets/{{ item }}"
+    follow: false
+  loop: [admin_password, database_password, database_root_password]
+  register: ductor_joomengine_secret_status
+  no_log: true
+
+- name: Read existing credentials for mismatch detection
+  ansible.builtin.slurp:
+    src: "{{ ductor_joomengine_root }}/secrets/{{ item.item }}"
+  loop: "{{ ductor_joomengine_secret_status.results }}"
+  when: item.stat.exists
+  register: ductor_joomengine_existing_secrets
+  no_log: true
+
+- name: Refuse implicit password rotation on persistent databases
+  ansible.builtin.assert:
+    that:
+      - (item.content | b64decode) == (lookup('file', ductor_config.credentials.joomengine_files[ductor_service.id]) | from_json)[item.item.item]
+    fail_msg: Existing credentials differ. Restore the enrolled controller credentials or perform an explicit native credential rotation.
+  loop: "{{ ductor_joomengine_existing_secrets.results }}"
+  when: item.content is defined
+  no_log: true
+
+- name: Stage initial credentials from protected operator files
+  ansible.builtin.copy:
+    content: "{{ (lookup('file', ductor_config.credentials.joomengine_files[ductor_service.id]) | from_json)[item] }}"
+    dest: "{{ ductor_joomengine_root }}/secrets/{{ item }}"
+    owner: root
+    group: root
+    mode: '0600'
+    force: false
+  loop: [admin_password, database_password, database_root_password]
+  no_log: true
+
+- name: Install the secret-free service definition
+  ansible.builtin.copy:
+    src: "{{ ductor_render_root }}/services/{{ ductor_service.id }}/{{ item }}"
+    dest: "{{ ductor_joomengine_root }}/{{ item }}"
+    owner: root
+    group: root
+    mode: '0600'
+  loop: [compose.yaml, entrypoint.sh]
+
+- name: Validate the installed service definition
+  ansible.builtin.command:
+    argv: [docker, compose, --file, '{{ ductor_joomengine_root }}/compose.yaml', config, --quiet]
+  changed_when: false
+
+- name: Pull only the selected digest-pinned images
+  ansible.builtin.command:
+    argv: [docker, compose, --file, '{{ ductor_joomengine_root }}/compose.yaml', pull]
+  changed_when: true
+
+- name: Verify that the selected image really contains the checked MCP archive
+  ansible.builtin.command:
+    argv:
+      - docker
+      - run
+      - --rm
+      - --network
+      - none
+      - --entrypoint
+      - /bin/bash
+      - '{{ ductor_service.image }}'
+      - -euc
+      - 'test -x /usr/sbin/apache2; test -n "$MCP_SHA512"; printf "%s  %s\n" "$MCP_SHA512" /usr/src/joomengine/mcp.zip | sha512sum -c -'
+  changed_when: false
+
+- name: Start services with native restart policies and wait for bootstrap
+  ansible.builtin.command:
+    argv: [docker, compose, --file, '{{ ductor_joomengine_root }}/compose.yaml', up, --detach, --no-build, --pull, never, --wait, --wait-timeout, '900']
+  changed_when: true

@@ -183,3 +183,10 @@ that its boundaries and recovery work. Cost and productivity benchmarking are a
 later activity, not a prerequisite for installation.
 
 Apache-2.0; see [LICENSE](LICENSE).
+
+## JoomEngine MCP service support
+
+Persistent Joomla/JCB services can use the official Apache `-mcp` Docker image
+with a private MariaDB database inside a dedicated Incus service VM. Ductor
+handles deployment and explicit native client enrollment; containers and VMs
+remain independent of the controller. See [the JoomEngine service guide](docs/joomengine.md).

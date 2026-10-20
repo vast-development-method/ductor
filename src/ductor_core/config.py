@@ -7,11 +7,11 @@ import json
 import re
 
 ID = re.compile(r"^[a-z][a-z0-9-]{0,47}$")
-IMAGE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9./_-]*(?::[a-zA-Z0-9._-]+|@sha256:[a-f0-9]{64})$")
+IMAGE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9./_-]*(?::[a-zA-Z0-9._-]+)?@sha256:[a-f0-9]{64}$|^[a-zA-Z0-9][a-zA-Z0-9./_-]*:[a-zA-Z0-9._-]+$")
 ROOT_KEYS = {"schema_version", "name", "hosts", "services", "service_vms", "incus", "agents", "model_accounts", "knowledge", "credentials", "runtime"}
 HOST_KEYS = {"address", "port", "user", "identity_file", "known_hosts_file", "become", "data_root", "resources", "roles"}
 RESOURCE_KEYS = {"cpus", "memory_mib", "disk_gib", "reserve_cpus", "reserve_memory_mib", "reserve_disk_gib"}
-SERVICE_KEYS = {"kind", "host", "enabled", "image", "bind_address", "port", "url", "cpus", "memory_mib", "disk_gib", "trusted_proxies", "allowed_origins", "required_pool", "agents", "provider_keys", "team", "ca_file", "uid", "gid", "openbao_service", "kv_mount", "gateway_token_file", "mcp_servers", "unseal_shares", "unseal_threshold"}
+SERVICE_KEYS = {"kind", "host", "enabled", "image", "bind_address", "port", "url", "cpus", "memory_mib", "disk_gib", "trusted_proxies", "allowed_origins", "required_pool", "agents", "provider_keys", "team", "ca_file", "uid", "gid", "openbao_service", "kv_mount", "gateway_token_file", "mcp_servers", "unseal_shares", "unseal_threshold", "database_image", "database_cpus", "database_memory_mib", "site_name", "admin_username", "admin_email", "mcp_client"}
 
 
 def empty_config(name="company"):
@@ -103,12 +103,15 @@ def validate(config, integrations=True):
         identifier(key, "service id")
         service = mapping(value, f"services.{key}")
         unknown(service, SERVICE_KEYS, f"services.{key}")
-        if service.get("kind") not in ("openclaw", "openbao"):
-            fail(f"services.{key}.kind: supported services are openclaw and openbao")
+        if service.get("kind") not in ("openclaw", "openbao", "joomengine"):
+            fail(f"services.{key}.kind: supported services are openclaw, openbao and joomengine")
         if type(service.get("enabled")) is not bool:
             fail(f"services.{key}.enabled must be boolean")
         common = {"kind", "host", "enabled", "image", "bind_address", "port", "url", "cpus", "memory_mib", "disk_gib", "uid", "gid"}
-        specific = ({"ca_file", "kv_mount", "unseal_shares", "unseal_threshold"} if service.get("kind") == "openbao"
+        if service.get("kind") == "joomengine":
+            common -= {"uid", "gid"}
+        specific = ({"database_image", "database_cpus", "database_memory_mib", "site_name", "admin_username", "admin_email", "mcp_client"} if service.get("kind") == "joomengine" else
+                    {"ca_file", "kv_mount", "unseal_shares", "unseal_threshold"} if service.get("kind") == "openbao"
                     else {"trusted_proxies", "allowed_origins", "required_pool", "agents", "provider_keys", "team", "openbao_service", "gateway_token_file", "mcp_servers"})
         unknown(service, common | specific, f"services.{key}")
         for field in ("uid", "gid"):
@@ -215,12 +218,15 @@ def validate(config, integrations=True):
     if "repository" in knowledge:
         unknown(mapping(knowledge["repository"], "knowledge.repository"), {"url", "branch"}, "knowledge.repository")
     credentials = mapping(config.get("credentials", {}), "credentials")
-    unknown(credentials, {"gateway_token_files", "openbao_token_file", "openbao_bootstrap_output_file", "openbao_unseal_file", "openbao_approles"}, "credentials")
+    unknown(credentials, {"gateway_token_files", "openbao_token_file", "openbao_bootstrap_output_file", "openbao_unseal_file", "openbao_approles", "joomengine_files", "joomengine_client_files"}, "credentials")
     for field in ("openbao_token_file", "openbao_bootstrap_output_file", "openbao_unseal_file"):
         if field in credentials:
             absolute(credentials[field], f"credentials.{field}")
     for sid, value in mapping(credentials.get("gateway_token_files", {}), "credentials.gateway_token_files").items():
         absolute(value, f"credentials.gateway_token_files.{sid}")
+    for group in ("joomengine_files", "joomengine_client_files"):
+        for sid, value in mapping(credentials.get(group, {}), f"credentials.{group}").items():
+            absolute(value, f"credentials.{group}.{sid}")
     for sid, value in mapping(credentials.get("openbao_approles", {}), "credentials.openbao_approles").items():
         refs = mapping(value, f"credentials.openbao_approles.{sid}")
         unknown(refs, {"role_id_file", "secret_id_file"}, f"credentials.openbao_approles.{sid}")
@@ -234,7 +240,7 @@ def validate(config, integrations=True):
         from .service_vm import validate_service_vms
         errors.extend(validate_service_vms(config))
     if integrations and not errors:
-        for module_name, function in (("openclaw", "validate_openclaw"), ("crabbox", "validate_pools"), ("openbao", "validate_openbao")):
+        for module_name, function in (("openclaw", "validate_openclaw"), ("crabbox", "validate_pools"), ("openbao", "validate_openbao"), ("joomengine", "validate_joomengine")):
             module = importlib.import_module(f"ductor_core.{module_name}")
             errors.extend(getattr(module, function)(config))
     return errors

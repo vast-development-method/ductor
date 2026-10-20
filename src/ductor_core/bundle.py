@@ -50,6 +50,9 @@ def _references(config):
         add(["credentials", field], recovery=field != "openbao_token_file")
     for service in config.get("credentials", {}).get("gateway_token_files", {}):
         add(["credentials", "gateway_token_files", service])
+    for group in ("joomengine_files", "joomengine_client_files"):
+        for service in config.get("credentials", {}).get(group, {}):
+            add(["credentials", group, service])
     for service in config.get("credentials", {}).get("openbao_approles", {}):
         for field in ("role_id_file", "secret_id_file"):
             add(["credentials", "openbao_approles", service, field])

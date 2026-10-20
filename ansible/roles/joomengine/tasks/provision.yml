@@ -1,0 +1,75 @@
+---
+- name: Install the native Joomla bootstrap helper outside the web root
+  ansible.builtin.copy:
+    src: joomengine-bootstrap.php
+    dest: "{{ ductor_joomengine_root }}/bootstrap/joomengine-bootstrap.php"
+    owner: root
+    group: root
+    mode: '0600'
+
+- name: Enroll a dedicated client without disclosing credentials
+  block:
+    - name: Stage the protected Joomla identity enrollment input
+      ansible.builtin.copy:
+        dest: "{{ ductor_joomengine_root }}/bootstrap/input.json"
+        owner: root
+        group: root
+        mode: '0600'
+        content: "{{ {'schema': 1, 'service_id': ductor_service.id, 'api_base': ductor_service.url | regex_replace('/$', '') ~ '/api/index.php', 'site_alias': ductor_service.id, 'client': ductor_service.mcp_client | combine({'password': (lookup('file', ductor_config.credentials.joomengine_files[ductor_service.id]) | from_json).mcp_password}), 'artifact_directory': '/var/lib/joomengine-mcp/artifacts'} | to_json }}"
+      no_log: true
+
+    - name: Run Joomla's enrollment APIs in the selected pinned service image
+      ansible.builtin.command:
+        argv:
+          - docker
+          - compose
+          - --file
+          - '{{ ductor_joomengine_root }}/compose.yaml'
+          - run
+          - --rm
+          - --no-deps
+          - --entrypoint
+          - php
+          - --volume
+          - '{{ ductor_joomengine_root }}/bootstrap:/run/ductor:ro'
+          - --volume
+          - '{{ ductor_joomengine_root }}/client:/run/ductor-output'
+          - joomla
+          - /run/ductor/joomengine-bootstrap.php
+          - --input
+          - /run/ductor/input.json
+          - --output
+          - /run/ductor-output/client.json
+      changed_when: true
+      no_log: true
+
+    - name: Synchronize installed JCB API definitions through the native console plugin
+      ansible.builtin.command:
+        argv: [docker, compose, --file, '{{ ductor_joomengine_root }}/compose.yaml', exec, -T, --user, www-data, joomla, php, /var/www/html/cli/joomla.php, 'joomla:mcp:jcb-sync', --no-interaction]
+      changed_when: true
+      no_log: true
+
+    - name: Retrieve the protected client handoff without logging its contents
+      ansible.builtin.fetch:
+        src: "{{ ductor_joomengine_root }}/client/client.json"
+        dest: "{{ ductor_config.credentials.joomengine_client_files[ductor_service.id] }}"
+        flat: true
+      no_log: true
+
+    - name: Restrict the local handoff permissions
+      ansible.builtin.file:
+        path: "{{ ductor_config.credentials.joomengine_client_files[ductor_service.id] }}"
+        mode: '0600'
+      delegate_to: localhost
+      become: false
+      no_log: true
+  always:
+    - name: Remove the temporary enrollment input after the attempt
+      ansible.builtin.file:
+        path: "{{ ductor_joomengine_root }}/bootstrap/input.json"
+        state: absent
+      no_log: true
+
+- name: Report only the handoff file location
+  ansible.builtin.debug:
+    msg: "MCP client enrollment completed. Protected local handoff: {{ ductor_config.credentials.joomengine_client_files[ductor_service.id] }}"

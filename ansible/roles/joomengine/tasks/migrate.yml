@@ -1,0 +1,36 @@
+---
+- name: Back up the persistent site and database before MCP changes
+  ansible.builtin.include_tasks: "{{ playbook_dir }}/roles/host/tasks/backup.yml"
+
+- name: Verify the locally bundled MCP package before an explicit installation
+  ansible.builtin.command:
+    argv:
+      - docker
+      - compose
+      - --file
+      - '{{ ductor_joomengine_root }}/compose.yaml'
+      - exec
+      - -T
+      - joomla
+      - /bin/bash
+      - -euc
+      - 'test -n "$MCP_SHA512"; printf "%s  %s\n" "$MCP_SHA512" /usr/src/joomengine/mcp.zip | sha512sum -c -'
+  changed_when: false
+
+- name: Install or update through Joomla's native extension installer
+  ansible.builtin.command:
+    argv: [docker, compose, --file, '{{ ductor_joomengine_root }}/compose.yaml', exec, -T, --user, www-data, joomla, php, /var/www/html/cli/joomla.php, 'extension:install', --path, /usr/src/joomengine/mcp.zip, --no-interaction]
+  changed_when: true
+  no_log: true
+
+- name: Record the explicit migration in persistent site state
+  ansible.builtin.copy:
+    dest: "{{ ductor_joomengine_root }}/joomla/.joomengine-mcp-installed"
+    content: "Installed through Ductor's explicit backed-up MCP migration.\n"
+    owner: '33'
+    group: '33'
+    mode: '0600'
+
+- name: Explain the separately scoped client enrollment
+  ansible.builtin.debug:
+    msg: "MCP migration completed. Run joomengine provision to enroll the configured dedicated client. Existing Joomla data and credentials were retained."

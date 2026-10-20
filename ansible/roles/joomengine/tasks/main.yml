@@ -1,0 +1,44 @@
+---
+- name: Set the selected persistent service directory
+  ansible.builtin.set_fact:
+    ductor_joomengine_root: "{{ ductor_host.data_root }}/services/{{ ductor_service.id }}"
+
+- name: Reject redirected managed paths before any privileged operation
+  ansible.builtin.command:
+    argv: [/usr/bin/python3, -c, "{{ lookup('file', playbook_dir ~ '/roles/openbao/files/guard-managed-paths.py') }}"]
+    stdin: "{{ {'root': ductor_joomengine_root, 'directories': ['joomla', 'database', 'artifacts', 'secrets', 'bootstrap', 'client'], 'files': ['compose.yaml', 'entrypoint.sh', 'bootstrap/input.json', 'bootstrap/joomengine-bootstrap.php', 'client/client.json', 'secrets/admin_password', 'secrets/database_password', 'secrets/database_root_password']} | to_json }}"
+  changed_when: false
+
+- name: Deploy the persistent container services
+  ansible.builtin.include_tasks: deploy.yml
+  when: ductor_action in ['deploy', 'update']
+
+- name: Read or operate installed services through native Docker
+  ansible.builtin.include_tasks: "{{ playbook_dir }}/roles/host/tasks/service-operation.yml"
+  when: ductor_action in ['status', 'restart', 'backup']
+
+- name: Verify the installed Compose configuration without changes
+  ansible.builtin.command:
+    argv: [docker, compose, --file, '{{ ductor_joomengine_root }}/compose.yaml', config, --quiet]
+  changed_when: false
+  when: ductor_action == 'preflight'
+
+- name: Read installed service health without recovery or restart
+  ansible.builtin.command:
+    argv: [docker, compose, --file, '{{ ductor_joomengine_root }}/compose.yaml', ps, --all, --format, json]
+  register: ductor_joomengine_health
+  changed_when: false
+  when: ductor_action == 'preflight'
+
+- name: Report observed service health
+  ansible.builtin.debug:
+    msg: "{{ ductor_joomengine_health.stdout_lines }}"
+  when: ductor_action == 'preflight'
+
+- name: Enroll the native MCP client using Joomla APIs
+  ansible.builtin.include_tasks: provision.yml
+  when: ductor_action == 'joomengine-provision'
+
+- name: Explicitly migrate the installed MCP package
+  ansible.builtin.include_tasks: migrate.yml
+  when: ductor_action == 'joomengine-migrate-mcp'
