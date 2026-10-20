@@ -18,7 +18,7 @@ jobs:
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           repository: vast-development-method/opencode-platform
-          ref: bd5f0ef513d706a444b0dfbdc98e45567cb4515a
+          ref: c69823dd53e51b37db1469a49e21c3d1a9703157
           path: _platform
       - name: Validate the native enrollment helper and reject unsafe inputs
         run: |

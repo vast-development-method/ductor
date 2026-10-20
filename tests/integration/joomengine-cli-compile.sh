@@ -12,19 +12,27 @@ umask 077
 mkdir -m 700 -- "$output"
 compose=(docker compose --file "$compose_file")
 cli=("${compose[@]}" exec -T --user www-data joomla)
+stage=discovery
 failed() {
-    printf 'Native JCB CLI fixture failed; private diagnostic files were retained.\n' >&2
+    local status=$?
+    printf 'Native JCB CLI fixture failed: stage=%s line=%s exit=%s; raw diagnostics remain private.\n' "$stage" "$1" "$status" >&2
+    # Only registered command names are safe to copy into public CI output.
+    if [[ -f $output/commands.txt ]]; then
+        awk '$1 ~ /^(componentbuilder:compile:component|joomla:mcp:[a-z:-]+)$/ { print "Registered command: " $1; if (++count == 20) exit }' "$output/commands.txt" >&2
+    fi
 }
-trap failed ERR
+trap 'failed "$LINENO"' ERR
 # Native command registration/help is checked before the fixed operation.
-"${cli[@]}" php /var/www/html/cli/joomla.php list --raw > "$output/commands.txt" 2> "$output/discovery.stderr"
-grep -Eq '^componentbuilder:compile:component[[:space:]]' "$output/commands.txt"
-grep -Eq '^joomla:mcp:serve[[:space:]]' "$output/commands.txt"
-grep -Eq '^joomla:mcp:jcb-sync[[:space:]]' "$output/commands.txt"
+"${cli[@]}" php /var/www/html/cli/joomla.php list --no-ansi > "$output/commands.txt" 2> "$output/discovery.stderr"
+grep -Eq '^[[:space:]]*componentbuilder:compile:component[[:space:]]' "$output/commands.txt"
+grep -Eq '^[[:space:]]*joomla:mcp:serve[[:space:]]' "$output/commands.txt"
+grep -Eq '^[[:space:]]*joomla:mcp:jcb-sync[[:space:]]' "$output/commands.txt"
+stage=compiler-help
 "${cli[@]}" php /var/www/html/cli/joomla.php help componentbuilder:compile:component \
     > "$output/compiler-help.txt" 2>> "$output/discovery.stderr"
 grep -Fq -- '--component' "$output/compiler-help.txt"
 grep -Fq -- '--joomla-version' "$output/compiler-help.txt"
+stage=joomla-version
 major=$("${cli[@]}" php -r 'define("_JEXEC", 1); require "/var/www/html/libraries/src/Version.php"; echo Joomla\CMS\Version::MAJOR_VERSION;')
 # Demo J6 is an installer fixture for this reviewed Joomla major.
 [[ $major == 6 ]]
@@ -45,9 +53,11 @@ archive_snapshot() {
         echo json_encode(["directory" => $root, "archives" => $rows], JSON_THROW_ON_ERROR), "\n";
     '
 }
+stage=archive-baseline
 archive_snapshot > "$output/before.json"
 # Clear native environment fallbacks, including install/backup/repository and
 # additional component selectors. The only selected operation is this fixture.
+stage=native-compile
 "${cli[@]}" env \
     -u JCB_COMPILE_COMPONENT -u JCB_COMPILE_COMPONENTS -u JCB_COMPILE_COMPONENTS_FILE \
     -u JCB_COMPILER_OPTIONS -u JCB_INSTALL -u JCB_COMPILE_INSTALL \
@@ -58,6 +68,7 @@ archive_snapshot > "$output/before.json"
     --component=1c20aec5-bf1a-44e7-9deb-d1c920ca591d --joomla-version="$major" \
     --add-build-date=2 --build-date=2026-01-01 --no-interaction \
     > "$output/compile.stdout" 2> "$output/compile.stderr"
+stage=archive-verification
 archive_snapshot > "$output/after.json"
 python3 - "$compose_file" "$output" <<'PY'
 import hashlib
