@@ -43,7 +43,7 @@ def private_json(path: str) -> dict:
 
 
 class Client:
-    def __init__(self, config: dict, ca_file: str | None):
+    def __init__(self, config: dict, ca_file: str | None, *, timeout: int = 60):
         self.url = config["url"]
         parts = urllib.parse.urlsplit(self.url)
         if parts.scheme != "https" or not parts.hostname or parts.username or parts.password or parts.query or parts.fragment:
@@ -56,6 +56,7 @@ class Client:
         self.session = None
         self.protocol = "2025-06-18"
         self.counter = 0
+        self.timeout = timeout
 
     def request(self, method: str, params: dict, *, notification: bool = False) -> dict:
         self.counter += 1
@@ -68,7 +69,7 @@ class Client:
             headers["Mcp-Session-Id"] = self.session
         req = urllib.request.Request(self.url, data=json.dumps(body).encode(), headers=headers, method="POST")
         try:
-            with self.http.open(req, timeout=60) as response:
+            with self.http.open(req, timeout=self.timeout) as response:
                 self.session = response.headers.get("Mcp-Session-Id", self.session)
                 raw = response.read(8 * 1024 * 1024 + 1)
                 if len(raw) > 8 * 1024 * 1024:

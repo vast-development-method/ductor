@@ -83,7 +83,8 @@ function validateEnrollment(array $input): array
             && is_array($rules) && count($rules) <= 64, 'Only explicit component assets may be granted.');
         foreach ($rules as $action => $allowed) {
             demand(is_string($action) && preg_match('/\A[a-z][a-z0-9_.-]{0,99}\z/D', $action) === 1
-                && is_bool($allowed), 'Permission entries must be named boolean rules.');
+                && $allowed === true, 'Permission entries must be explicit named grants.');
+            demand($action !== 'core.login.admin', 'Administrator login cannot be granted to an API identity.');
             demand($action !== 'core.admin' || in_array($asset, ['com_componentbuilder', 'com_installer'], true),
                 'Administrator grants are limited to explicitly selected JCB or installer component authority.');
         }
@@ -241,6 +242,7 @@ function enrollmentMain(array $arguments): void
         Access::clearStatics();
         $user = new User((int) $user->id);
         demand(!$user->authorise('core.admin') && $user->authorise('core.login.api')
+            && !$user->authorise('core.login.admin') && !$user->authorise('core.login.site')
             && $user->authorise('mcp.access', 'com_joomengine_mcp') && $user->authorise('mcp.execute', 'com_joomengine_mcp'),
             'Effective native Joomla permissions do not match the enrolled identity.');
         demand($user->authorise('mcp.write', 'com_joomengine_mcp') === ($client['permissions']['com_joomengine_mcp']['mcp.write'] ?? false),

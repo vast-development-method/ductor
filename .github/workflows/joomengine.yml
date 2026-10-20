@@ -11,13 +11,29 @@ concurrency:
 jobs:
   native-service:
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Check out the exact JoomEngine worker runtime candidate
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          repository: octoleo/joomengine
+          ref: f87b9ec158b334d00c12728d8483821c6e420d12
+          path: _joomengine
+      - name: Check out the exact agent-platform native MCP client
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          repository: vast-development-method/opencode-platform
+          ref: 53e902ba6a4fccdfce1838508309b8fdb91b1cf8
+          path: _platform
       - name: Validate the native enrollment helper and reject unsafe inputs
         run: |
           sudo apt-get update
           sudo apt-get install -y php-cli jq
           bash tests/integration/joomengine-bootstrap-input.sh
       - name: Exercise generated service containers and native MCP authorization
+        env:
+          JOOMENGINE_TEST_CHECKOUT: ${{ github.workspace }}/_joomengine
+          JOOMENGINE_TEST_JCB: '1'
+          PLATFORM_CHECKOUT: ${{ github.workspace }}/_platform
         run: bash tests/integration/joomengine.sh

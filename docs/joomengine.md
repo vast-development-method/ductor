@@ -31,8 +31,10 @@ Add the service to `services` with these fields:
 | `site_name`, `admin_username`, `admin_email` | Explicit installation identity; admin username uses 3–32 letters |
 | `mcp_client` | Dedicated `{id, username, name, email, permissions}` object |
 
-`mcp_client.permissions` defaults to `{}` for a read-only MCP identity. It can
-contain explicitly selected Joomla component assets and boolean `true` actions.
+`mcp_client.permissions` defaults to `{}` for discovery and basic system reads.
+Content/JCB read authority must be explicitly added for the target component:
+the article read integration uses `{"com_content":{"core.manage":true}}`.
+The map contains selected Joomla component assets and boolean `true` actions.
 For example, JCB operations can receive only the required actions on
 `com_componentbuilder`. Root permissions and administrator login are rejected.
 Native JCB jobs require explicitly selected `core.admin` on
@@ -108,6 +110,15 @@ native endpoint at `/api/index.php/v1/joomengine-mcp`; clients send the token us
 credential flow. The controller ZIP includes both private file references and
 rebases them when imported on another controller.
 
+Each service configuration manages one explicit MCP client. Adding further
+identities requires a separate deliberate native enrollment; provisioning never
+shares a broad administrator token with every agent. Empty component permissions
+allow discovery and system reads. Article reads additionally need
+`com_content.core.manage`; JCB compilation needs explicit
+`com_componentbuilder.core.admin` plus MCP write/approval permissions, while
+installation additionally needs `com_installer.core.admin`. These are scoped
+component grants, never global Super User access.
+
 ## Persistence, updates and backups
 
 Persistent bind directories under the selected host data root hold Joomla,
@@ -138,5 +149,18 @@ The native integration workflow runs generated Compose services against real
 MariaDB, enrolls a dedicated client twice, checks authenticated MCP initialization
 and discovery, an allowed read and a denied write, then recreates containers and
 checks the same identity and persistent data again. It uses a disposable trusted
-TLS certificate and private files. Production Incus routing, external TLS and
+TLS certificate and private files. When `PLATFORM_CHECKOUT` names the pinned
+opencode-platform checkout, the same service is exercised by its actual
+`vdm-joomla-mcp read-test` client before and after recreation. Its token remains
+in a mode-`0600` file and diagnostic evidence remains private on the test runner.
+With `JOOMENGINE_TEST_JCB=1`, a separate compiler identity explicitly approves a
+compile of the installer-provided Demo J6, observes the durable job from a new
+session, checks confirmation replay safety, and downloads and verifies the
+resulting archives by SHA-256, ZIP integrity and Joomla manifest. It does not
+install the result. Test credentials, containers and artifacts are removed on
+exit. `JOOMENGINE_TEST_CHECKOUT` can select an exact upstream source checkout for
+candidate worker-runtime builds; production images still require registry
+digests. Full JCB jobs require an image with PHP `pcntl_fork`, `posix_setsid` and
+`proc_open` available; MCP discovery alone does not verify that worker runtime.
+Production Incus routing, external TLS and
 backup restoration still require validation against the actual infrastructure.
