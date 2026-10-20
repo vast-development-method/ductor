@@ -42,6 +42,10 @@ This is the operating-system image for running the gateway's Docker deployment;
 it is separate from the approved Node-capable image used for agent workers.
 Ductor consumes approved images and does not add a custom image builder.
 
+The service VM uses Secure Boot. The approved source must support it; an image
+declaring `requirements.secureboot=false` is rejected instead of weakening the
+VM's profile to boot it.
+
 The hypervisor must run Incus 6.14 or later and expose the required project,
 VM and bridge/NIC ACL APIs. Version alone is not a substitute for the live API
 feature check. Select a patched release available from approved host repositories.
@@ -90,6 +94,11 @@ Complete every declared account enrollment. For OpenBao API keys, provision and
 import the keys first; plain `deploy` also attempts activation. Running Ductor
 again does not become necessary for normal VM or gateway operation.
 
+The supplied service-VM example uses OpenBao API keys. The login sequence applies
+only after declaring native `model_accounts` and the agents' matching
+`auth_profiles` instead. Replace the example command IDs with the service and
+agent IDs in the chosen configuration.
+
 Incus boot autostart owns the service VM's host-boot lifecycle. Docker owns the
 gateway's native restart policy. Restarting the Ductor controller only restores
 the operator console and monitoring; it does not recreate or restart the VM.
@@ -99,6 +108,9 @@ rerunning `bootstrap-services` without recreating the VM. Existing connections
 may survive a policy update; test the new policy with fresh connections. Image,
 cloud-init identity, subnet and resource-envelope changes remain protected by the
 immutable VM ownership check and require a separately planned migration.
+
+Read-only preflight reports a missing or stopped VM as blocked. It does not start
+the VM or repair its state merely because the controller is reconnecting.
 
 ## Network boundary
 
@@ -153,6 +165,14 @@ Do not claim independent per-user agent/account isolation or attribution from th
 setup. Use separate gateways and credential boundaries where that isolation is
 required. The dedicated service-VM path rejects the alternative `team` proxy-auth
 configuration so it cannot replace the retained native token/device boundary.
+
+After the first browser connection requests pairing, use the native commands
+recorded in the gateway's `activation.json` under `browser_access`:
+`devices list --json`, then `devices approve <exact-request-id>` after verifying
+that request. Run the local native CLI through the operator's verified SSH access
+to the service VM, using its existing file SecretRef; do not put the gateway token
+on a command line. Device approval is deliberate, not an automatic latest-request
+selection.
 
 The selected OpenClaw image runs as UID/GID **1000:1000**. Its private home and
 cache ownership require those values; the deployment rejects overrides rather

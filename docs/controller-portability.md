@@ -86,11 +86,20 @@ changes to one host. These are operation-scoped locks, not runtime leases or a
 controller leader election. A monitor does not hold the deployment lock between
 polls, and stopping a controller does not stop any service.
 
+The shared lock is `/run/lock/ductor-infrastructure.lock` on each target host,
+held by native `flock` over verified SSH for the explicit operation's duration.
+Controllers must use a consistent effective administrative identity on that host
+(normally the configured deployment user with sudo to root).
+
 The lock is advisory among cooperating Ductor controllers; it cannot serialize an
 administrator changing the host through another tool. An interrupted explicit
 deployment can leave partial changes. Reconnect with status and inspect the result
 before retrying; a multi-host deployment is not a distributed atomic transaction.
 Controller restart does not automatically retry that deployment.
+
+Losing the lock connection stops the supervised local mutation process, but does
+not fence or roll back a remote command already submitted. Inspect after a lost
+connection or forced controller termination before another mutation.
 
 The lock prevents overlapping mutations; it does not automatically reconcile
 conflicting desired configurations. Keep an approved source of configuration,
