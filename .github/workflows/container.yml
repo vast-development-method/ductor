@@ -137,9 +137,10 @@ jobs:
           set -Eeuo pipefail
           printf '%s' "$GH_TOKEN" | docker login ghcr.io --username "$GHCR_USER" --password-stdin
           trap 'docker logout ghcr.io' EXIT
-          docker buildx imagetools create --tag "$IMAGE:$VERSION" --tag "$IMAGE:sha-$REVISION" \
+          docker buildx imagetools create --tag "$IMAGE:$VERSION" --tag "$IMAGE:sha-$REVISION" --tag "$IMAGE:latest" \
             "$IMAGE:sha-$REVISION-amd64" "$IMAGE:sha-$REVISION-arm64"
           docker buildx imagetools inspect "$IMAGE:$VERSION"
+          docker buildx imagetools inspect "$IMAGE:latest"
       - name: Publish the immutable standalone release bundle
         shell: bash
         run: |
@@ -151,4 +152,4 @@ jobs:
           if [[ $VERSION == *-* ]]; then prerelease=(--prerelease); fi
           gh release create "v$VERSION" --verify-tag --title "Ductor $VERSION" \
             --generate-notes "${prerelease[@]}" "$archive" "$archive.sha256" install.sh
-          printf 'Published `%s:%s` for Linux amd64/arm64 and the checksum-verified standalone bundle.\n' "$IMAGE" "$VERSION" >> "$GITHUB_STEP_SUMMARY"
+          printf 'Published `%s:%s` and `%s:latest` for Linux amd64/arm64 and the checksum-verified standalone bundle.\n' "$IMAGE" "$VERSION" "$IMAGE" >> "$GITHUB_STEP_SUMMARY"
