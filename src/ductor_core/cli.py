@@ -13,9 +13,11 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 
 from .config import empty_config, load_config, require_valid, validate
-from .inventory import build_inventory, save_inventory, verify_ssh_files
+from .inventory import build_inventory, build_service_vm_inventory, save_inventory, verify_ssh_files
+from .remote_lock import infrastructure_lock
 from .util import check_private_file, private_dir, state_lock, write_private
 
 BUNDLE = Path(os.environ.get("DUCTOR_BUNDLE", Path(__file__).resolve().parents[2]))
@@ -47,7 +49,17 @@ def parser():
     trust = host.add_parser("trust", help="enroll host key against an independently verified SHA256 fingerprint")
     trust.add_argument("--host", required=True)
     trust.add_argument("--fingerprint", required=True)
-    for action in ("render", "plan", "deploy", "update", "preflight", "status", "restart", "backup", "activate", "bootstrap-workers"):
+    monitor = commands.add_parser("monitor", help="poll live status only; deployed services do not depend on this process")
+    monitor.add_argument("--host")
+    monitor.add_argument("--service")
+    monitor.add_argument("--interval", type=int, default=30, help="seconds between completed status polls (minimum 10)")
+    monitor.add_argument("--once", action="store_true", help="perform one status poll and exit")
+    bundle = commands.add_parser("bundle", help="move private controller configuration and keys between installations").add_subparsers(dest="bundle_action", required=True)
+    export = bundle.add_parser("export")
+    export.add_argument("--output", required=True, type=Path)
+    export.add_argument("--include-recovery", action="store_true")
+    bundle.add_parser("import").add_argument("archive", type=Path)
+    for action in ("render", "plan", "deploy", "update", "preflight", "status", "restart", "backup", "activate", "bootstrap-workers", "bootstrap-services"):
         operation = commands.add_parser(action)
         operation.add_argument("--host")
         operation.add_argument("--service")
@@ -107,6 +119,9 @@ def setup(config, state):
     if config["hosts"]:
         raise ValueError("Use the management menu to edit existing infrastructure")
     print("Ductor setup saves references and budgets. Host changes require deploy.\n"
+          "This basic wizard enrolls existing hosts. For a dedicated main-agent VM,\n"
+          "start from examples/service-vm.example.json and follow docs/service-vm.md;\n"
+          "bootstrap-services provisions that VM before ordinary service deployment.\n"
           "Have your SSH key, approved Incus image fingerprint and mTLS files available.")
     host = add_host(config, state)
     worker = host
@@ -193,13 +208,22 @@ def render(config, state, host=None, service=None, action=None):
     if structural:
         raise ValueError("Configuration is invalid:\n- " + "\n- ".join(structural))
     selected = copy.deepcopy(config)
-    if action == "bootstrap-workers":
+    service_inventory = None
+    if action == "bootstrap-services":
+        service_inventory = build_service_vm_inventory(config, BUNDLE, state / "rendered", host, service)
+        selected_ids = {vm["id"] for entry in service_inventory["all"]["children"]["ductor_hosts"]["hosts"].values()
+                        for vm in entry["ductor_service_vms"]}
+        selected["service_vms"] = {key: value for key, value in config.get("service_vms", {}).items() if key in selected_ids}
+        # Only the structural service-VM contract applies during infrastructure
+        # bootstrap. Model accounts and company documents are provisioned later.
+    elif action == "bootstrap-workers":
         if service:
             raise ValueError("bootstrap-workers selects worker hosts with --host; --service is not supported")
         selected["services"] = {}
         selected["credentials"] = {}
         selected["agents"] = []
         selected["knowledge"] = {}
+        selected["service_vms"] = {}
         if host:
             selected["incus"]["pools"] = {key: pool for key, pool in config["incus"]["pools"].items() if pool["host"] == host}
             selected["incus"]["bootstrap"] = {key: value for key, value in config["incus"].get("bootstrap", {}).items() if key == host}
@@ -219,15 +243,18 @@ def render(config, state, host=None, service=None, action=None):
         selected["incus"]["pools"] = {key: pool for key, pool in config["incus"]["pools"].items() if key in needed or (not service and pool["host"] == host)}
         pool_hosts = {pool["host"] for pool in selected["incus"]["pools"].values()}
         selected["incus"]["bootstrap"] = {key: value for key, value in config["incus"].get("bootstrap", {}).items() if key in pool_hosts}
-    require_valid(selected)
+        guest_hosts = {value["host"] for value in selected["services"].values()}
+        selected["service_vms"] = {key: value for key, value in config.get("service_vms", {}).items() if value["guest_host"] in guest_hosts}
+    if action != "bootstrap-services":
+        require_valid(selected)
     private_dir(state)
     stage = Path(tempfile.mkdtemp(prefix="render-", dir=state))
     final = state / "rendered"
     try:
-        for name in ("openclaw", "crabbox", "openbao"):
+        for name in (("service_vm",) if action == "bootstrap-services" else ("openclaw", "crabbox", "openbao", "service_vm")):
             module = importlib.import_module(f"ductor_core.{name}")
-            getattr(module, f"render_{name}")(selected, stage)
-        inventory = build_inventory(config, BUNDLE, final, host, service)
+            getattr(module, f"render_{name}")(config if name == "service_vm" and action != "bootstrap-services" else selected, stage)
+        inventory = service_inventory or build_inventory(config, BUNDLE, final, host, service)
         if action == "bootstrap-workers":
             entries = inventory["all"]["children"]["ductor_hosts"]["hosts"]
             worker_entries = {key: value for key, value in entries.items() if value["ductor_pools"]}
@@ -259,6 +286,32 @@ def record(state, command, result, **metadata):
     write_private(path, event)
 
 
+def monitor(config_path, state, interval=30, host=None, service=None, once=False):
+    """Reload saved state for each observation; never reconcile or repair hosts."""
+    if not 10 <= interval <= 3600:
+        raise ValueError("Monitoring interval must be between 10 and 3600 seconds")
+    while True:
+        code = 1
+        try:
+            with state_lock(state):
+                try:
+                    config = load_config(config_path)
+                    code = operation(config, state, "status", host, service)
+                except (ValueError, OSError, KeyError, TypeError, subprocess.CalledProcessError) as error:
+                    print(f"Monitoring observation failed: {error}", file=sys.stderr, flush=True)
+                write_private(state / "monitor-status.json", {
+                    "observed_at": datetime.now(timezone.utc).isoformat(),
+                    "result": "passed" if code == 0 else "failed", "returncode": code,
+                    "host": host, "service": service, "remote_changes": False})
+        except (ValueError, OSError) as error:
+            print(f"Monitoring poll deferred: {error}", file=sys.stderr, flush=True)
+        if once:
+            return code
+        # No local or remote lock is retained while waiting. Other controllers
+        # and native services continue independently when this process exits.
+        time.sleep(interval)
+
+
 def operation(config, state, action, host=None, service=None, stage_only=False):
     if action == "activate" and service and config["services"].get(service, {}).get("kind") != "openclaw":
         raise ValueError("activate --service must select an OpenClaw gateway")
@@ -276,6 +329,7 @@ def operation(config, state, action, host=None, service=None, stage_only=False):
             print(json.dumps({"version": version(), "transport": "verified SSH", "hosts": {
                 name: {"address": entry["ansible_host"], "services": [{"id": s["id"], "image": s["image"], "url": s["url"]} for s in entry["ductor_services"]],
                        "pools": [{"id": pool["id"], "max_instances": pool["max_instances"], "project": pool["project"]} for pool in entry["ductor_pools"]],
+                       "service_vms": [{"id": vm["id"], "guest_host": vm["guest_host"], "project": vm["project"]} for vm in entry["ductor_service_vms"]],
                        "resources": entry["ductor_host"]["resources"]}
                 for name, entry in inventory["all"]["children"]["ductor_hosts"]["hosts"].items()},
                 "rendered": str(rendered), "host_changes": False}, indent=2))
@@ -308,7 +362,8 @@ def operation(config, state, action, host=None, service=None, stage_only=False):
             executable = str(sibling)
     if not executable:
         raise ValueError("ansible-playbook is missing; install the pinned Ductor release dependencies")
-    playbook = "site.yml" if action in ("plan", "deploy", "update", "preflight", "activate", "bootstrap-workers") else "operations.yml"
+    playbook = ("service-vms.yml" if action == "bootstrap-services" else
+                "site.yml" if action in ("plan", "deploy", "update", "preflight", "activate", "bootstrap-workers") else "operations.yml")
     argv = [executable, "-i", str(rendered / "inventory.json"), str(BUNDLE / "ansible" / playbook),
             "--extra-vars", json.dumps({"ductor_action": action, "ductor_activate": not stage_only})]
     temporary = private_dir(state / "ansible-tmp")
@@ -316,10 +371,16 @@ def operation(config, state, action, host=None, service=None, stage_only=False):
     env = dict(os.environ, ANSIBLE_CONFIG=str(BUNDLE / "ansible/ansible.cfg"), ANSIBLE_HOST_KEY_CHECKING="True",
                ANSIBLE_HOME=str(private_dir(state / "ansible")), ANSIBLE_LOCAL_TEMP=str(temporary), ANSIBLE_SSH_CONTROL_PATH_DIR=str(controls))
     record(state, action, "running", host=host, service=service)
-    result = subprocess.run(argv, env=env, cwd=BUNDLE, check=False)
+    if action in ("deploy", "update", "activate", "bootstrap-workers", "bootstrap-services", "restart", "backup"):
+        with infrastructure_lock(inventory) as held:
+            result = held.run(argv, env=env, cwd=BUNDLE, check=False)
+    else:
+        result = subprocess.run(argv, env=env, cwd=BUNDLE, check=False)
     record(state, action, "passed" if result.returncode == 0 else "failed", returncode=result.returncode, host=host, service=service)
     if result.returncode == 0 and action in ("deploy", "update"):
         print("Deployment reconciled. Run preflight and activate; live production qualification remains required.")
+    if result.returncode == 0 and action == "bootstrap-services":
+        print("Service VMs provisioned. Enroll each guest SSH key using the fingerprint reported through its verified hypervisor, then deploy services.")
     return result.returncode
 
 
@@ -343,7 +404,19 @@ def trust_host(config, state, name, fingerprint):
                 matched.append(line)
     if not matched:
         raise ValueError("Scanned host keys do not match the verified fingerprint; nothing was trusted")
-    write_private(host["known_hosts_file"], "\n".join(matched) + "\n")
+    trust_path = Path(host["known_hosts_file"])
+    retained = []
+    if trust_path.exists():
+        if trust_path.is_symlink() or not trust_path.is_file():
+            raise ValueError("Existing SSH trust must be a regular file")
+        existing = trust_path.read_text().splitlines()
+        lookup_name = host["address"] if host["port"] == 22 else f"[{host['address']}]:{host['port']}"
+        found = subprocess.run(["ssh-keygen", "-F", lookup_name, "-f", str(trust_path)], capture_output=True, text=True, check=False)
+        if found.returncode not in (0, 1):
+            raise ValueError("Existing SSH trust file could not be inspected; nothing changed")
+        replaced = {line for line in found.stdout.splitlines() if line and not line.startswith("#")}
+        retained = [line for line in existing if line not in replaced]
+    write_private(trust_path, "\n".join(retained + matched) + "\n")
     print(f"Verified SSH host key saved for {name}")
 
 
@@ -360,10 +433,11 @@ def native_login(config, state, service_id, agent_id, provider, profile):
     remote = (["sudo", "-n"] if host["become"] else []) + ["docker", "compose", "-f", compose, "run", "--rm", "--no-deps", "--entrypoint", "node", "gateway", "dist/index.js", *candidates[0]["argv"]]
     ssh = ["ssh", "-tt", "-p", str(host["port"]), "-i", host["identity_file"], "-o", "StrictHostKeyChecking=yes", "-o", "IdentitiesOnly=yes", "-o", "BatchMode=yes", "-o", "UserKnownHostsFile=" + host["known_hosts_file"], f"{host['user']}@{host['address']}", shlex.join(remote)]
     stop = (["sudo", "-n"] if host["become"] else []) + ["docker", "compose", "-f", compose, "stop", "--timeout", "30", "gateway"]
-    stopped = subprocess.run([*ssh[:-1], shlex.join(stop)], check=False)
-    if stopped.returncode:
-        return stopped.returncode
-    result = subprocess.run(ssh, check=False)
+    with infrastructure_lock(inventory) as held:
+        stopped = held.run([*ssh[:-1], shlex.join(stop)], check=False)
+        if stopped.returncode:
+            return stopped.returncode
+        result = held.run(ssh, check=False)
     print("Gateway remains stopped. Run activate after account enrollment to verify the exact binding.")
     return result.returncode
 
@@ -418,6 +492,8 @@ def main(argv=None):
     path = (args.config or state / "config.json").expanduser().absolute()
     command = args.command or "menu"
     try:
+        if command == "monitor":
+            return monitor(path, state, args.interval, args.host, args.service, args.once)
         with state_lock(state):
             if command == "self-update":
                 if os.environ.get("DUCTOR_CONTAINER") == "1":
@@ -428,6 +504,14 @@ def main(argv=None):
                     raise ValueError(f"Configuration already exists: {path}")
                 write_private(path, empty_config(args.name))
                 print(f"Created private draft: {path}; run setup to configure infrastructure")
+                return 0
+            if command == "bundle":
+                from .bundle import export_bundle, import_bundle
+                if args.bundle_action == "import":
+                    result = import_bundle(args.archive.expanduser().absolute(), state, path)
+                else:
+                    result = export_bundle(load_config(path), state, args.output.expanduser().absolute(), args.include_recovery)
+                print(json.dumps(result, indent=2))
                 return 0
             if command == "config" and args.config_action == "import":
                 config = load_config(args.file)
@@ -478,11 +562,27 @@ def main(argv=None):
                 from . import openbao
                 if args.credentials_action == "incus":
                     incus_identity(config, args.pool)
-                elif args.credentials_action == "put":
-                    print(json.dumps(openbao.put_secret(config, args.service, args.provider, str(args.input_file)), indent=2))
                 else:
-                    operation_name = {"bootstrap": "bootstrap", "unseal": "unseal", "provision": "provision_credentials"}[args.credentials_action]
-                    result = getattr(openbao, operation_name)(config, service_id=args.service)
+                    errors = validate(config, integrations=False)
+                    if errors:
+                        raise ValueError("\n".join(errors))
+                    selected_bao = args.service
+                    if args.credentials_action == "put":
+                        gateway = config["services"].get(args.service, {})
+                        if gateway.get("kind") != "openclaw":
+                            raise ValueError("Provider credentials require an OpenClaw gateway")
+                        selected_bao = gateway.get("openbao_service")
+                    bao_id, _ = openbao._select(config, selected_bao)
+                    inventory = build_inventory(config, BUNDLE, state / "operations", service_filter=bao_id)
+                    verify_ssh_files(inventory)
+                    with infrastructure_lock(inventory) as held:
+                        held.assert_held()
+                        if args.credentials_action == "put":
+                            result = openbao.put_secret(config, args.service, args.provider, str(args.input_file))
+                        else:
+                            operation_name = {"bootstrap": "bootstrap", "unseal": "unseal", "provision": "provision_credentials"}[args.credentials_action]
+                            result = getattr(openbao, operation_name)(config, service_id=args.service)
+                        held.assert_held()
                     print(json.dumps(result, indent=2))
             elif command == "login":
                 return native_login(config, state, args.service, args.agent, args.provider, args.profile)

@@ -1,0 +1,244 @@
+{
+  "schema_version": 2,
+  "name": "service-vm-example",
+  "hosts": {
+    "control": {
+      "address": "192.0.2.10",
+      "port": 22,
+      "user": "deploy",
+      "identity_file": "/var/lib/ductor/inputs/ssh-key",
+      "known_hosts_file": "/var/lib/ductor/inputs/hypervisor-known-hosts",
+      "become": true,
+      "data_root": "/srv/ductor",
+      "roles": [
+        "services",
+        "incus"
+      ],
+      "resources": {
+        "cpus": 32,
+        "memory_mib": 65536,
+        "disk_gib": 500,
+        "reserve_cpus": 2,
+        "reserve_memory_mib": 4096,
+        "reserve_disk_gib": 30
+      }
+    },
+    "gateway-vm": {
+      "address": "10.80.0.10",
+      "port": 22,
+      "user": "deploy",
+      "identity_file": "/var/lib/ductor/inputs/ssh-key",
+      "known_hosts_file": "/var/lib/ductor/inputs/gateway-vm-known-hosts",
+      "become": true,
+      "data_root": "/srv/ductor",
+      "roles": [
+        "services"
+      ],
+      "resources": {
+        "cpus": 8,
+        "memory_mib": 16384,
+        "disk_gib": 70,
+        "reserve_cpus": 1,
+        "reserve_memory_mib": 2048,
+        "reserve_disk_gib": 15
+      }
+    }
+  },
+  "services": {
+    "bao": {
+      "kind": "openbao",
+      "host": "control",
+      "enabled": true,
+      "image": "ghcr.io/openbao/openbao:2.7.1",
+      "bind_address": "127.0.0.1",
+      "port": 8200,
+      "url": "https://bao.example.org",
+      "cpus": 1,
+      "memory_mib": 1024,
+      "disk_gib": 20
+    },
+    "agents": {
+      "kind": "openclaw",
+      "host": "gateway-vm",
+      "enabled": true,
+      "image": "ghcr.io/openclaw/openclaw:2026.10.5",
+      "bind_address": "10.80.0.10",
+      "port": 18789,
+      "url": "https://agents.example.org",
+      "cpus": 2,
+      "memory_mib": 4096,
+      "disk_gib": 40,
+      "required_pool": "workers",
+      "agents": [
+        "lead",
+        "worker",
+        "reviewer"
+      ],
+      "trusted_proxies": [
+        "192.0.2.20"
+      ],
+      "allowed_origins": [
+        "https://agents.example.org"
+      ],
+      "openbao_service": "bao",
+      "provider_keys": {
+        "openai": "gateways/agents/openai/apiKey"
+      }
+    }
+  },
+  "incus": {
+    "pools": {
+      "workers": {
+        "host": "control",
+        "address": "https://incus.example.org:8443",
+        "project": "ductor-workers",
+        "profile": "ductor-worker",
+        "instance_type": "virtual-machine",
+        "image_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "image_source_project": "default",
+        "worker_node_version": "24.16.0",
+        "allow_vm_lowlevel": true,
+        "network": "incusbr0",
+        "network_acl": "ductor-workers",
+        "storage_pool": "default",
+        "client_certificate_file": "/var/lib/ductor/inputs/incus.crt",
+        "client_key_file": "/var/lib/ductor/inputs/incus.key",
+        "server_certificate_file": "/var/lib/ductor/inputs/server.crt",
+        "cpus": 8,
+        "memory_mib": 16384,
+        "disk_gib": 160,
+        "instance_cpus": 2,
+        "instance_memory_mib": 4096,
+        "instance_disk_gib": 30,
+        "max_instances": 4
+      }
+    }
+  },
+  "agents": [
+    {
+      "id": "lead",
+      "name": "Lead",
+      "model": "openai/gpt-6-astra",
+      "runtime": "openclaw",
+      "role": "orchestrator",
+      "auth_profiles": [],
+      "allow_agents": [
+        "worker",
+        "reviewer"
+      ]
+    },
+    {
+      "id": "worker",
+      "name": "Worker",
+      "model": "openai/gpt-6-astra",
+      "runtime": "openclaw",
+      "role": "worker",
+      "auth_profiles": [],
+      "allow_agents": []
+    },
+    {
+      "id": "reviewer",
+      "name": "Reviewer",
+      "model": "openai/gpt-6-astra",
+      "runtime": "openclaw",
+      "role": "reviewer",
+      "auth_profiles": [],
+      "allow_agents": []
+    }
+  ],
+  "model_accounts": {},
+  "runtime": {
+    "max_concurrent": 4,
+    "max_children": 2,
+    "max_depth": 2,
+    "run_timeout_seconds": 1800
+  },
+  "knowledge": {
+    "source_dir": "/var/lib/ductor/inputs/knowledge"
+  },
+  "credentials": {
+    "gateway_token_files": {
+      "agents": "/var/lib/ductor/inputs/gateway-token"
+    },
+    "openbao_token_file": "/var/lib/ductor/inputs/operator-token",
+    "openbao_unseal_file": "/var/lib/ductor/inputs/recovery.json",
+    "openbao_bootstrap_output_file": "/var/lib/ductor/inputs/recovery.json",
+    "openbao_approles": {
+      "agents": {
+        "role_id_file": "/var/lib/ductor/inputs/role-id",
+        "secret_id_file": "/var/lib/ductor/inputs/secret-id"
+      }
+    }
+  },
+  "service_vms": {
+    "main-gateway": {
+      "hypervisor": "control",
+      "guest_host": "gateway-vm",
+      "service": "agents",
+      "project": "ductor-services",
+      "instance": "main-gateway",
+      "network": "svc-main0",
+      "network_cidr": "10.80.0.1/24",
+      "ipv4_address": "10.80.0.10",
+      "ipv4_nat": true,
+      "storage_pool": "default",
+      "image_source_project": "default",
+      "image_fingerprint": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "image_os": "ubuntu-24.04",
+      "cpus": 8,
+      "memory_mib": 16384,
+      "disk_gib": 80,
+      "ssh_public_key": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAABAgMEBQYHCAkKCwwNDg8QERITFBUWFxgZGhscHR4f REPLACE-WITH-YOUR-DEPLOYMENT-PUBLIC-KEY",
+      "management_sources": [
+        "192.0.2.30/32"
+      ],
+      "proxy_sources": [
+        "192.0.2.20/32"
+      ],
+      "service_ports": [
+        18789
+      ],
+      "dns_servers": [
+        "192.0.2.53"
+      ],
+      "egress": [
+        {
+          "destination": "192.0.2.10/32",
+          "protocol": "tcp",
+          "ports": [
+            8443
+          ]
+        },
+        {
+          "destination": "192.0.2.20/32",
+          "protocol": "tcp",
+          "ports": [
+            443
+          ]
+        },
+        {
+          "destination": "10.70.0.0/24",
+          "protocol": "tcp",
+          "ports": [
+            22
+          ]
+        },
+        {
+          "destination": "198.51.100.0/24",
+          "protocol": "tcp",
+          "ports": [
+            80,
+            443
+          ]
+        },
+        {
+          "destination": "203.0.113.0/24",
+          "protocol": "tcp",
+          "ports": [
+            443
+          ]
+        }
+      ]
+    }
+  }
+}

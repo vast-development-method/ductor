@@ -19,7 +19,7 @@ def complete_config(root):
         'image_source_project': 'default', 'worker_node_version': '24.16.0', 'allow_vm_lowlevel': True,
         'network': 'incusbr0', 'network_acl': 'ductor-workers', 'storage_pool': 'default',
         'client_certificate_file': str(root / 'incus.crt'), 'client_key_file': str(root / 'incus.key'),
-        'server_certificate_file': str(root / 'server.crt'), 'cpus': 8, 'memory_mib': 16384, 'disk_gib': 120,
+        'server_certificate_file': str(root / 'server.crt'), 'cpus': 8, 'memory_mib': 16384, 'disk_gib': 160,
         'instance_cpus': 2, 'instance_memory_mib': 4096, 'instance_disk_gib': 30, 'max_instances': 4}}}
     config['services'] = {
         'bao': {'kind': 'openbao', 'host': 'control', 'enabled': True, 'image': 'ghcr.io/openbao/openbao:2.7.1',

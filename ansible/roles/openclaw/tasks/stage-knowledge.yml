@@ -1,0 +1,45 @@
+---
+# The calling deploy task has stopped the Gateway. These directories are
+# exclusively imported source snapshots, not work products or the wiki vault.
+- name: Inspect parent paths before deleting managed imports
+  ansible.builtin.stat:
+    path: "{{ ductor_gateway_dir }}/{{ item }}"
+    follow: false
+  loop: "{{ ['state', 'state/workspaces'] + (ductor_service.agents | map('regex_replace', '^(.*)$', 'state/workspaces/\\1') | list) }}"
+  register: ductor_knowledge_parents
+
+- name: Reject symlink or non-directory parents for managed source replacement
+  ansible.builtin.assert:
+    that:
+      - not item.stat.exists or (item.stat.isdir | default(false))
+      - not (item.stat.islnk | default(false))
+    fail_msg: "Managed company import parents must be real directories; refusing to traverse a symlink or replace unrelated state."
+  loop: "{{ ductor_knowledge_parents.results }}"
+  loop_control:
+    label: "{{ item.item }}"
+
+- name: Remove prior imported source snapshots including removed Markdown files
+  ansible.builtin.file:
+    path: "{{ ductor_gateway_dir }}/{{ item }}"
+    state: absent
+  loop: "{{ ['state/company-knowledge'] + (ductor_service.agents | map('regex_replace', '^(.*)$', 'state/workspaces/\\1/company') | list) }}"
+
+- name: Stage the current company snapshot and assigned agent instructions
+  ansible.builtin.copy:
+    src: "{{ ductor_render_root }}/services/{{ ductor_service.id }}/state/"
+    dest: "{{ ductor_gateway_dir }}/state/"
+    owner: "{{ ductor_service.uid | default(1000) }}"
+    group: "{{ ductor_service.gid | default(1000) }}"
+    mode: "0600"
+    directory_mode: "0700"
+    follow: false
+  diff: false
+
+- name: Record the deployed managed source snapshot outside agent-writable state
+  ansible.builtin.copy:
+    content: "{{ {'schema_version': 1, 'agents': ductor_service.agents, 'source_sha256': (lookup('ansible.builtin.file', ductor_render_root ~ '/services/' ~ ductor_service.id ~ '/activation.json') | from_json).knowledge_sha256, 'ownership': ['state/company-knowledge', 'state/workspaces/<assigned-agent>/company', 'state/workspaces/<assigned-agent>/AGENTS.md']} | to_nice_json }}\n"
+    dest: "{{ ductor_gateway_dir }}/managed-sources.json"
+    owner: root
+    group: root
+    mode: "0600"
+  diff: false

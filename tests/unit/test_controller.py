@@ -126,6 +126,22 @@ class ControllerTests(unittest.TestCase):
             cli.incus_identity(self.config, 'workers')
         run.assert_not_called()
 
+    @patch('ductor_core.cli.subprocess.run')
+    def test_enrolling_one_ssh_host_preserves_unrelated_trust(self, run):
+        fingerprint = 'SHA256:' + 'a' * 43
+        existing = '[127.0.0.1]:2222 ssh-ed25519 OLD'
+        other = 'other.example.org ssh-ed25519 KEEP'
+        write_private(self.root / 'known-hosts', existing + '\n' + other + '\n')
+        run.side_effect = [
+            subprocess.CompletedProcess([], 0, '[127.0.0.1]:2222 ssh-ed25519 NEW\n', ''),
+            subprocess.CompletedProcess([], 0, '256 ' + fingerprint + ' host (ED25519)', ''),
+            subprocess.CompletedProcess([], 0, '# Host found: line 1\n' + existing + '\n', '')]
+        cli.trust_host(self.config, self.root, 'control', fingerprint)
+        result = (self.root / 'known-hosts').read_text()
+        self.assertIn(other, result)
+        self.assertIn('NEW', result)
+        self.assertNotIn('OLD', result)
+
     def test_symlink_state_and_secret_outputs_refused(self):
         outside = self.root / 'outside'
         outside.mkdir()
@@ -133,3 +149,70 @@ class ControllerTests(unittest.TestCase):
         link.symlink_to(outside)
         with self.assertRaises(ValueError):
             write_private(link / 'file', 'private')
+
+    @patch('ductor_core.cli.shutil.which', return_value='/usr/bin/ansible-playbook')
+    @patch('ductor_core.cli.subprocess.run')
+    def test_reconnected_monitor_only_reads_live_status_without_deployment_inputs(self, run, which):
+        state = self.root / 'observer'
+        self.config['knowledge']['source_dir'] = str(self.root / 'missing-knowledge')
+        write_private(self.root / 'ssh-key', 'private fixture')
+        write_private(self.root / 'known-hosts', 'host ssh-ed25519 fixture')
+        write_private(state / 'config.json', self.config)
+        run.return_value = subprocess.CompletedProcess([], 0)
+        self.assertEqual(cli.monitor(state / 'config.json', state, once=True), 0)
+        argv = run.call_args.args[0]
+        self.assertTrue(argv[3].endswith('/ansible/operations.yml'))
+        self.assertEqual(json.loads(argv[-1])['ductor_action'], 'status')
+        self.assertFalse((state / 'rendered').exists())
+        observation = json.loads((state / 'monitor-status.json').read_text())
+        self.assertFalse(observation['remote_changes'])
+
+    @patch('ductor_core.cli.time.sleep')
+    @patch('ductor_core.cli.operation')
+    def test_monitor_reloads_configuration_and_releases_lock_between_polls(self, operation, sleep):
+        state = self.root / 'observer'
+        path = state / 'config.json'
+        write_private(path, self.config)
+        operation.side_effect = [1, 0]
+        calls = 0
+        def next_poll(interval):
+            nonlocal calls
+            calls += 1
+            with state_lock(state):
+                changed = copy.deepcopy(self.config)
+                changed['name'] = 'updated'
+                write_private(path, changed)
+            if calls == 2:
+                raise KeyboardInterrupt()
+        sleep.side_effect = next_poll
+        with self.assertRaises(KeyboardInterrupt):
+            cli.monitor(path, state)
+        self.assertEqual([call.args[0]['name'] for call in operation.call_args_list], ['example', 'updated'])
+        self.assertTrue(all(call.args[2] == 'status' for call in operation.call_args_list))
+        self.assertEqual(json.loads((state / 'monitor-status.json').read_text())['result'], 'passed')
+
+    def test_service_vm_bootstrap_never_connects_to_or_renders_uncreated_guest(self):
+        from test_service_vm import service_vm_config
+        config = service_vm_config(self.root)
+        config['knowledge']['source_dir'] = str(self.root / 'not-yet-enrolled')
+        directory, inventory = cli.render(config, self.root / 'bootstrap', service='agents', action='bootstrap-services')
+        entries = inventory['all']['children']['ductor_hosts']['hosts']
+        self.assertEqual(set(entries), {'control'})
+        self.assertEqual(entries['control']['ductor_services'], [])
+        self.assertEqual(entries['control']['ductor_pools'], [])
+        self.assertEqual(entries['control']['ductor_service_vms'][0]['guest_host'], 'gateway')
+        self.assertTrue((directory / 'service-vms/gateway/profile.json').exists())
+        self.assertFalse((directory / 'services/agents').exists())
+        with self.assertRaisesRegex(ValueError, 'No service VMs'):
+            cli.render(config, self.root / 'bootstrap', host='gateway', action='bootstrap-services')
+
+    def test_service_vm_and_workers_share_physical_host_capacity_admission(self):
+        from test_service_vm import service_vm_config
+        config = service_vm_config(self.root)
+        self.assertEqual(validate(config), [])
+        # 8 worker CPUs + 4 gateway VM CPUs + 1 Bao CPU + 2 OS reserve.
+        config['hosts']['control']['resources']['cpus'] = 14
+        self.assertTrue(any('OS reserve' in error for error in validate(config)))
+        config['hosts']['control']['resources']['cpus'] = 24
+        config['hosts']['gateway']['resources']['memory_mib'] = 16384
+        self.assertTrue(any('VM allocation' in error for error in validate(config)))

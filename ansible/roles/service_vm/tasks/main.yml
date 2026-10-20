@@ -1,0 +1,199 @@
+---
+# Infrastructure provisioning only; the VM survives the controller and uses
+# native Incus autostart. Runtime leases remain exclusively with Crabbox.
+- name: Require explicit provisioning or read-only verification
+  ansible.builtin.assert:
+    that:
+      - ductor_action in ['bootstrap-services', 'preflight']
+      - inventory_hostname == ductor_service_vm.hypervisor
+      - ansible_connection == 'ssh'
+
+- name: Load the reviewed native service VM configuration
+  ansible.builtin.set_fact:
+    ductor_sv_project: "{{ lookup('ansible.builtin.file', ductor_render_root + '/service-vms/' + ductor_service_vm.id + '/project.json') | from_json }}"
+    ductor_sv_network: "{{ lookup('ansible.builtin.file', ductor_render_root + '/service-vms/' + ductor_service_vm.id + '/network.json') | from_json }}"
+    ductor_sv_acl: "{{ lookup('ansible.builtin.file', ductor_render_root + '/service-vms/' + ductor_service_vm.id + '/acl.json') | from_json }}"
+    ductor_sv_profile: "{{ lookup('ansible.builtin.file', ductor_render_root + '/service-vms/' + ductor_service_vm.id + '/profile.json') | from_json }}"
+    ductor_sv_identity: "{{ lookup('ansible.builtin.file', ductor_render_root + '/service-vms/' + ductor_service_vm.id + '/identity.json') | from_json }}"
+
+- name: Read initialized Incus API capabilities
+  ansible.builtin.command:
+    argv: [incus, query, /1.0]
+  changed_when: false
+  register: ductor_sv_api
+
+- name: Require native VM isolation and cloud-init support
+  ansible.builtin.assert:
+    that: "['projects', 'projects_limits', 'projects_limits_disk', 'projects_limits_instances', 'projects_restrictions', 'projects_restricted_storage_pool_access', 'network_acl', 'network_bridge_acl', 'network_bridge_acl_devices', 'virtual-machines', 'cloud_init'] | difference((ductor_sv_api.stdout | from_json).api_extensions) | length == 0"
+    fail_msg: The initialized Incus daemon lacks required service VM APIs. Approve its package and storage separately before bootstrap-services.
+
+- name: Require a daemon newer than the bridge ACL anti-spoofing vulnerability
+  ansible.builtin.assert:
+    that: (ductor_sv_api.stdout | from_json).environment.server_version is version('6.14', '>=')
+    fail_msg: "Service VM networking requires Incus 6.14 or newer (GHSA-p7fw-vjjm-2rwp). A separately qualified LTS backport is not inferred from its version number."
+
+- name: Verify existing approved storage
+  ansible.builtin.command:
+    argv: [incus, storage, show, "{{ ductor_service_vm.storage_pool }}"]
+  changed_when: false
+
+- name: Verify VM hardware acceleration
+  ansible.builtin.stat:
+    path: /dev/kvm
+  register: ductor_sv_kvm
+
+- name: Require hardware virtualization
+  ansible.builtin.assert:
+    that: ductor_sv_kvm.stat.exists
+    fail_msg: Service VMs require /dev/kvm; containers are not an isolation fallback.
+
+- name: Inspect the exact approved cloud image
+  ansible.builtin.command:
+    argv: [incus, image, list, "{{ ductor_service_vm.image_fingerprint }}", --project, "{{ ductor_service_vm.image_source_project }}", --format, json]
+  changed_when: false
+  register: ductor_sv_images
+
+- name: Require the pinned VM image for this architecture
+  ansible.builtin.assert:
+    that:
+      - ductor_sv_images.stdout | from_json | length == 1
+      - (ductor_sv_images.stdout | from_json)[0].fingerprint == ductor_service_vm.image_fingerprint
+      - (ductor_sv_images.stdout | from_json)[0].type == 'virtual-machine'
+      - (ductor_sv_images.stdout | from_json)[0].architecture == ansible_facts.architecture
+      - (ductor_sv_images.stdout | from_json)[0].properties.get('requirements.secureboot', '') != 'false'
+    fail_msg: Import the approved Secure Boot compatible Ubuntu 24.04 or Debian 13 cloud VM image with cloud-init and incus-agent first. bootstrap-services never selects a moving image alias or disables Secure Boot.
+
+- name: Inspect existing service project
+  ansible.builtin.command:
+    argv: [incus, project, list, --format, json]
+  changed_when: false
+  register: ductor_sv_projects
+
+- name: Inspect existing managed networks
+  ansible.builtin.command:
+    argv: [incus, network, list, --project, default, --format, json]
+  changed_when: false
+  register: ductor_sv_networks
+
+- name: Inspect existing network ACLs
+  ansible.builtin.command:
+    argv: [incus, network, acl, list, --project, default, --format, json]
+  changed_when: false
+  register: ductor_sv_acls
+
+- name: Resolve service infrastructure identities
+  ansible.builtin.set_fact:
+    ductor_sv_old_project: "{{ ductor_sv_projects.stdout | from_json | selectattr('name', 'equalto', ductor_service_vm.project) | list }}"
+    ductor_sv_old_network: "{{ ductor_sv_networks.stdout | from_json | selectattr('name', 'equalto', ductor_service_vm.network) | list }}"
+    ductor_sv_old_acl: "{{ ductor_sv_acls.stdout | from_json | selectattr('name', 'equalto', ductor_sv_identity.acl) | list }}"
+
+- name: Refuse to adopt any existing unowned infrastructure
+  ansible.builtin.assert:
+    that:
+      - ductor_sv_old_project | length == 0 or ductor_sv_old_project[0].config.get('user.ductor.service-vm', '') == ductor_service_vm.id
+      - ductor_sv_old_network | length == 0 or ductor_sv_old_network[0].config.get('user.ductor.service-vm', '') == ductor_service_vm.id
+      - ductor_sv_old_network | length == 0 or (ductor_sv_old_network[0].type == 'bridge' and ductor_sv_old_network[0].managed)
+      - ductor_sv_old_acl | length == 0 or ductor_sv_old_acl[0].config.get('user.ductor.service-vm', '') == ductor_service_vm.id
+    fail_msg: Project, bridge or ACL already exists without this service VM's ownership marker. No resources have been adopted or overwritten.
+
+- name: Inspect project instances without mutating them
+  ansible.builtin.command:
+    argv: [incus, list, --project, "{{ ductor_service_vm.project }}", --format, json]
+  changed_when: false
+  register: ductor_sv_instances
+  when: ductor_sv_old_project | length > 0
+
+- name: Resolve existing service instance
+  ansible.builtin.set_fact:
+    ductor_sv_old_instance: "{{ (ductor_sv_instances.stdout | default('[]') | from_json) | selectattr('name', 'equalto', ductor_service_vm.instance) | list }}"
+
+- name: Require the exact owned VM and unchanged provisioning inputs
+  ansible.builtin.assert:
+    that:
+      - ductor_sv_old_instance | length == 0 or ductor_sv_old_instance[0].type == 'virtual-machine'
+      - ductor_sv_old_instance | length == 0 or ductor_sv_old_instance[0].config.get('user.ductor.service-vm', '') == ductor_service_vm.id
+      - ductor_sv_old_instance | length == 0 or ductor_sv_old_instance[0].config.get('user.ductor.spec.sha256', '') == ductor_sv_identity.spec_sha256
+      - ductor_sv_old_instance | length == 0 or ductor_sv_old_instance[0].config.get('volatile.base_image', '') == ductor_service_vm.image_fingerprint
+      - ductor_sv_old_project | length == 0 or ductor_sv_instances.stdout | from_json | length == ductor_sv_old_instance | length
+    fail_msg: Existing VM ownership, base image or desired bootstrap inputs changed. Ductor will not replace/reconfigure a persistent service VM implicitly; plan an explicit migration.
+
+- name: Require an existing running service VM during read-only preflight
+  ansible.builtin.assert:
+    that:
+      - ductor_sv_old_instance | length == 1
+      - ductor_sv_old_instance[0].status == 'Running'
+    fail_msg: Service VM is absent or stopped. preflight reports state and never creates or starts infrastructure.
+  when: ductor_action == 'preflight'
+
+- name: Verify subnet is free of unrelated host routes
+  ansible.builtin.command:
+    argv:
+      - /usr/bin/python3
+      - -c
+      - |
+        import ipaddress,json,subprocess,sys
+        wanted=ipaddress.ip_interface(sys.argv[1]).network
+        for route in json.loads(subprocess.check_output(['ip','-json','-4','route','show','table','all'])):
+            dst=route.get('dst','default')
+            if dst == 'default' or route.get('dev') == sys.argv[2]: continue
+            if ipaddress.ip_network(dst,strict=False).overlaps(wanted):
+                raise SystemExit('Service VM subnet overlaps existing route: '+dst)
+      - "{{ ductor_service_vm.network_cidr }}"
+      - "{{ ductor_service_vm.network }}"
+  changed_when: false
+
+- name: Reconcile explicitly approved service VM infrastructure
+  ansible.builtin.include_tasks: provision.yml
+  when: ductor_action == 'bootstrap-services'
+
+- name: Verify service infrastructure after provisioning or during preflight
+  ansible.builtin.include_tasks: verify.yml
+
+- name: Wait for the native guest agent
+  ansible.builtin.command:
+    argv: [incus, exec, "{{ ductor_service_vm.instance }}", --project, "{{ ductor_service_vm.project }}", --, 'true']
+  register: ductor_sv_agent
+  changed_when: false
+  until: ductor_sv_agent.rc == 0
+  retries: 60
+  delay: 5
+
+- name: Wait for cloud-init completion without changing guest configuration
+  ansible.builtin.command:
+    argv: [incus, exec, "{{ ductor_service_vm.instance }}", --project, "{{ ductor_service_vm.project }}", --, cloud-init, status, --wait]
+  changed_when: false
+  async: 900
+  poll: 10
+  when: ductor_action == 'bootstrap-services'
+
+- name: Verify cloud-init finished successfully
+  ansible.builtin.command:
+    argv: [incus, exec, "{{ ductor_service_vm.instance }}", --project, "{{ ductor_service_vm.project }}", --, cloud-init, status, --format, json]
+  changed_when: false
+  register: ductor_sv_cloud_status
+
+- name: Require successful native initialization
+  ansible.builtin.assert:
+    that: (ductor_sv_cloud_status.stdout | from_json).status == 'done'
+    fail_msg: Guest cloud-init has not completed successfully. Inspect its native logs and approved DNS/APT mirror routes (stock images can require HTTP 80 as well as HTTPS 443); the gateway has not been deployed.
+
+- name: Read the actual guest operating system
+  ansible.builtin.command:
+    argv: [incus, exec, "{{ ductor_service_vm.instance }}", --project, "{{ ductor_service_vm.project }}", --, sh, -c, '. /etc/os-release; printf "%s-%s" "$ID" "$VERSION_ID"']
+  changed_when: false
+  register: ductor_sv_guest_os
+
+- name: Require the approved guest operating system
+  ansible.builtin.assert:
+    that: ductor_sv_guest_os.stdout == ductor_service_vm.image_os
+    fail_msg: The pinned image booted an unexpected operating system; do not deploy services into it.
+
+- name: Read guest SSH host-key fingerprint over the verified hypervisor connection
+  ansible.builtin.command:
+    argv: [incus, exec, "{{ ductor_service_vm.instance }}", --project, "{{ ductor_service_vm.project }}", --, ssh-keygen, -l, -E, sha256, -f, /etc/ssh/ssh_host_ed25519_key.pub]
+  changed_when: false
+  register: ductor_sv_ssh_fingerprint
+
+- name: Show independent guest host-key enrollment input
+  ansible.builtin.debug:
+    msg: "Guest {{ ductor_service_vm.guest_host }} key verified through hypervisor SSH: {{ ductor_sv_ssh_fingerprint.stdout }}. Enroll with ductor host trust --host {{ ductor_service_vm.guest_host }} --fingerprint {{ ductor_sv_ssh_fingerprint.stdout.split()[1] }} before normal deploy. Hypervisor root access is not copied into the guest."

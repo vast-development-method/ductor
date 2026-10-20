@@ -4,6 +4,9 @@ The Ductor container is an interactive operations tool. It has no runtime daemon
 Docker socket mount, incoming broker port or host-network requirement. Closing it
 does not stop the deployed services.
 
+An optional monitoring mode keeps this operations client polling status. It does
+not take over the services' runtime lifecycle.
+
 The image repository is `ghcr.io/vast-development-method/ductor`. Use a published
 version or commit tag and record the resolved image digest for the deployment.
 A version in `VERSION` is not proof that its release image has been published.
@@ -64,6 +67,36 @@ trusted channel before enrollment.
 The read-only container filesystem has a temporary `/tmp`; persistent controller
 state and native service state are separate. Do not add a Docker socket mount to
 work around SSH failures.
+
+## Persistent monitoring
+
+Use the optional override after setup, with the same state/input mounts and
+UID/GID settings:
+
+```bash
+docker compose -f compose.ductor.yaml -f compose.monitor.yaml up -d
+docker compose -f compose.ductor.yaml -f compose.monitor.yaml logs -f ductor
+```
+
+The override runs `monitor` with a native container restart policy. If the
+controller container stops, application services continue independently. When it
+starts again, it reconnects to live status and resumes polling; it does not
+redeploy, restart or initialize application services. Failed polls are reported
+and leave services untouched. There are no new listening ports or Docker-socket
+permissions in monitoring mode.
+
+A completed poll is not an all-services-healthy verdict; inspect the reported
+native states. The monitor supplies current observations, not alerts or a history
+of the periods when that controller was offline.
+
+For an interactive session while monitoring runs, use the base Compose file with
+`run --rm ductor`. The monitor releases its operation lock between polls so an
+explicit operator action can acquire it.
+
+To add another controller, use [bundle export/import](controller-portability.md)
+instead of expecting identical local paths. Import relocates the configuration's
+referenced inputs into the new persistent state directory. The ZIP includes
+credentials and is unencrypted; use private transfer and storage.
 
 ## Controller upgrades
 

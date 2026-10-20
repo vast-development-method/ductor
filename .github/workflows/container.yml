@@ -98,8 +98,9 @@ jobs:
           docker run "${options[@]}" ductor:ci --help
           docker run "${options[@]}" --entrypoint /bin/sh ductor:ci -ec 'test ! -e /var/run/docker.sock; ! command -v docker; ! command -v incus; ! command -v sshd; ansible-playbook --version'
           mkdir -p "$RUNNER_TEMP/state" "$RUNNER_TEMP/inputs"
-          DUCTOR_STATE_PATH="$RUNNER_TEMP/state" DUCTOR_INPUTS_PATH="$RUNNER_TEMP/inputs" \
-            docker compose -f compose.ductor.yaml config --quiet
+          export DUCTOR_STATE_PATH="$RUNNER_TEMP/state" DUCTOR_INPUTS_PATH="$RUNNER_TEMP/inputs"
+          docker compose -f compose.ductor.yaml config --quiet
+          docker compose -f compose.ductor.yaml -f compose.monitor.yaml config --quiet
       - name: Publish the tested architecture on an explicit release tag
         if: github.repository == 'vast-development-method/ductor' && github.event_name == 'push' && github.ref_type == 'tag'
         env:

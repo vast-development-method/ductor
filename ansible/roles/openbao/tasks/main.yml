@@ -17,6 +17,15 @@
     argv: [docker, compose, version]
   changed_when: false
 
+- name: Guard OpenBao configuration and bind destinations before privileged access
+  ansible.builtin.command:
+    argv:
+      - python3
+      - -c
+      - "{{ lookup('ansible.builtin.file', role_path ~ '/files/guard-managed-paths.py') }}"
+    stdin: "{{ {'root': bao_service_root, 'directories': ['data', 'audit', 'backups'], 'files': ['compose.yaml', 'server.hcl']} | to_json }}"
+  changed_when: false
+
 - name: Install OpenBao desired state
   ansible.builtin.include_tasks: deploy.yml
   when: ductor_action in ['deploy', 'update']

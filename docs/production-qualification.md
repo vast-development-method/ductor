@@ -11,7 +11,10 @@ acceptance are different evidence.
 | --- | --- |
 | Configuration | Invalid references, unsupported options, over-budget hosts and port collisions fail before mutation |
 | SSH | Real SSH on same-server and remote paths; wrong/missing host keys fail |
+| Service VM | Dedicated project, verified guest SSH key, fixed private UI port, denied unapproved ingress and worker certificate denied service-project administration |
 | Persistence | Service recreation and controller shutdown preserve state and runtime operation |
+| Controller reconnect | Stop Ductor during live work; restore the console and inspect status without redeploying, restarting or reinitializing services |
+| Multiple controllers | Import a private bundle into a new state; inspect the same services without deploying; concurrent read-only monitors work and overlapping host mutations are refused |
 | OpenBao | Production initialization/unseal, scoped AppRole, renewal, denied paths, sealed-server failure, backup and restore |
 | Provider accounts | Each selected native account works; missing/revoked credentials do not switch to an unapproved account |
 | Workers | Real Incus VM creation, approved image, connectivity, resource limits, pool exhaustion and cleanup |
@@ -25,6 +28,9 @@ acceptance are different evidence.
 - A single gateway is a trusted-team boundary, not an independently isolated
   billing-account or hostile-user tenancy system. Use separate gateways when that
   separation matters.
+- External proxy SSO adds admission control. The dedicated service VM retains a
+  native shared-owner gateway token and manual device approval; this does not
+  establish per-user tenancy or independent per-user agent authority.
 - Explicit worker pools are supported; automatic multi-host capacity scheduling
   is not established by this integration.
 - The native wiki is shared within a gateway. Cross-gateway findings require an

@@ -48,3 +48,24 @@
       when:
         - ductor_action == 'status'
         - item.stdout is defined
+
+    - name: Read isolated service VM status
+      ansible.builtin.command:
+        argv: [incus, list, '{{ ductor_service_vm.instance }}', --project, '{{ ductor_service_vm.project }}', --columns, nst, --format, csv]
+      loop: "{{ ductor_service_vms }}"
+      loop_control:
+        loop_var: ductor_service_vm
+        label: "{{ ductor_service_vm.id }}"
+      register: ductor_service_vm_status
+      changed_when: false
+      when: ductor_action == 'status'
+
+    - name: Report isolated service VM status
+      ansible.builtin.debug:
+        msg: "{{ item.stdout_lines }}"
+      loop: "{{ ductor_service_vm_status.results | default([]) }}"
+      loop_control:
+        label: "{{ item.ductor_service_vm.id }}"
+      when:
+        - ductor_action == 'status'
+        - item.stdout is defined

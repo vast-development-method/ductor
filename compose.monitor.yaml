@@ -1,0 +1,8 @@
+# Optional read-only observer. Use with compose.ductor.yaml after configuration.
+# Stopping this container has no effect on deployed services or VMs.
+services:
+  ductor:
+    command: [monitor, --interval, '30']
+    restart: unless-stopped
+    stdin_open: false
+    tty: false

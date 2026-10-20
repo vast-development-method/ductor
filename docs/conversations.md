@@ -10,16 +10,18 @@ orchestrator is the primary conversational agent. It can delegate only to the
 configured agents. Workers return evidence and artifact identifiers; a separate
 reviewer can inspect those results and return corrections.
 
-A token-authenticated gateway is a trusted-owner domain. Named team members need
-an identity-aware reverse proxy and the service's `team` configuration. Configure
-exact trusted proxy addresses, an identity header, required headers, allowed users
-and administrators. The proxy must authenticate the user, overwrite identity
-headers and prevent direct access to the private origin. A header being present
-is not proof that a JWT was validated.
+The recommended dedicated service VM retains native gateway-token authentication
+and manual approval of browser devices. The operator's external TLS proxy can
+also enforce organizational SSO, MFA and an allowed-user policy. Configure exact
+HTTPS browser origins and narrow trusted proxy addresses, and restrict the
+private gateway port to those proxies. See the [service-VM runbook](service-vm.md).
 
-Use native OpenClaw user/role administration for final role assignment and verify
-access through the real proxy before inviting the team. Separate gateways are
-required for mutually untrusted teams or independently isolated accounts.
+The gateway token grants shared-owner authority. Proxy identity does not establish
+per-user native agent isolation or independent account attribution. The dedicated
+VM path therefore rejects the alternative `team` proxy-auth configuration and
+does not disable native authentication or pairing. Separate gateways are required
+for mutually untrusted teams or independently isolated accounts. Verify the real
+proxy, device-approval and worker WebSocket paths before inviting the team.
 
 ## Model accounts
 

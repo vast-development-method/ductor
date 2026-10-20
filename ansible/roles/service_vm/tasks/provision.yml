@@ -1,0 +1,69 @@
+---
+- name: Create the dedicated ACL with ownership
+  ansible.builtin.command:
+    argv: [incus, network, acl, create, "{{ ductor_sv_identity.acl }}", "user.ductor.service-vm={{ ductor_service_vm.id }}", --project, default]
+  when: ductor_sv_old_acl | length == 0
+
+- name: Apply approved service VM ACL
+  ansible.builtin.command:
+    argv: [incus, network, acl, edit, "{{ ductor_sv_identity.acl }}", --project, default]
+    stdin: "{{ ductor_sv_acl | to_json }}"
+  when: ductor_sv_old_acl | length == 0 or ductor_sv_old_acl[0].ingress != ductor_sv_acl.ingress or ductor_sv_old_acl[0].egress != ductor_sv_acl.egress
+
+- name: Create the dedicated bridge with ownership
+  ansible.builtin.command:
+    argv: [incus, network, create, "{{ ductor_service_vm.network }}", --type, bridge, --project, default, "user.ductor.service-vm={{ ductor_service_vm.id }}", "ipv4.address={{ ductor_service_vm.network_cidr }}", "ipv4.nat={{ ductor_service_vm.ipv4_nat | ternary('true', 'false') }}", 'ipv6.address=none', "security.acls={{ ductor_sv_identity.acl }}", 'security.acls.default.ingress.action=reject', 'security.acls.default.egress.action=reject']
+  when: ductor_sv_old_network | length == 0
+
+- name: Reconcile owned bridge policy
+  ansible.builtin.command:
+    argv: [incus, network, edit, "{{ ductor_service_vm.network }}", --project, default]
+    stdin: "{{ ductor_sv_network | to_json }}"
+  when: ductor_sv_old_network | length > 0 and (ductor_sv_old_network[0].config | combine(ductor_sv_network.config)) != ductor_sv_old_network[0].config
+
+- name: Create the controller-only service project
+  ansible.builtin.command:
+    argv: [incus, project, create, "{{ ductor_service_vm.project }}", -c, "user.ductor.service-vm={{ ductor_service_vm.id }}"]
+  when: ductor_sv_old_project | length == 0
+
+- name: Apply service project quota and restrictions
+  ansible.builtin.command:
+    argv: [incus, project, edit, "{{ ductor_service_vm.project }}"]
+    stdin: "{{ ductor_sv_project | to_json }}"
+  when: ductor_sv_old_project | length == 0 or (ductor_sv_old_project[0].config | combine(ductor_sv_project.config)) != ductor_sv_old_project[0].config
+
+- name: Read project profiles
+  ansible.builtin.command:
+    argv: [incus, profile, list, --project, "{{ ductor_service_vm.project }}", --format, json]
+  register: ductor_sv_profiles
+  changed_when: false
+
+- name: Resolve the service profile
+  ansible.builtin.set_fact:
+    ductor_sv_old_profile: "{{ ductor_sv_profiles.stdout | from_json | selectattr('name', 'equalto', ductor_sv_identity.profile) | list }}"
+
+- name: Refuse an unowned service profile
+  ansible.builtin.assert:
+    that: ductor_sv_old_profile | length == 0 or ductor_sv_old_profile[0].config.get('user.ductor.service-vm', '') == ductor_service_vm.id
+
+- name: Create the service profile
+  ansible.builtin.command:
+    argv: [incus, profile, create, "{{ ductor_sv_identity.profile }}", --project, "{{ ductor_service_vm.project }}"]
+    stdin: "{{ ductor_sv_profile | to_json }}"
+  when: ductor_sv_old_profile | length == 0
+
+- name: Apply fixed VM limits and cloud-init before first start
+  ansible.builtin.command:
+    argv: [incus, profile, edit, "{{ ductor_sv_identity.profile }}", --project, "{{ ductor_service_vm.project }}"]
+    stdin: "{{ ductor_sv_profile | to_json }}"
+  when: ductor_sv_old_profile | length > 0 and (ductor_sv_old_profile[0].config != ductor_sv_profile.config or ductor_sv_old_profile[0].devices != ductor_sv_profile.devices)
+
+- name: Create the persistent VM without starting it
+  ansible.builtin.command:
+    argv: [incus, init, "local:{{ ductor_service_vm.image_fingerprint }}", "{{ ductor_service_vm.instance }}", --vm, --project, "{{ ductor_service_vm.project }}", --profile, "{{ ductor_sv_identity.profile }}", --config, "user.ductor.service-vm={{ ductor_service_vm.id }}", --config, "user.ductor.spec.sha256={{ ductor_sv_identity.spec_sha256 }}"]
+  when: ductor_sv_old_instance | length == 0
+
+- name: Start the approved persistent service VM
+  ansible.builtin.command:
+    argv: [incus, start, "{{ ductor_service_vm.instance }}", --project, "{{ ductor_service_vm.project }}"]
+  when: ductor_sv_old_instance | length == 0 or ductor_sv_old_instance[0].status != 'Running'

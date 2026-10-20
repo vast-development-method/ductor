@@ -1,4 +1,12 @@
 ---
+- name: Keep the executable deployment definition under root-owned storage
+  ansible.builtin.file:
+    path: "{{ bao_service_root }}"
+    state: directory
+    owner: root
+    group: root
+    mode: '0700'
+
 - name: Create protected OpenBao bind directories
   ansible.builtin.file:
     path: "{{ item }}"
@@ -7,19 +15,20 @@
     group: "{{ bao_gid }}"
     mode: '0700'
   loop:
-    - "{{ bao_service_root }}"
     - "{{ bao_service_root }}/data"
     - "{{ bao_service_root }}/audit"
     - "{{ bao_service_root }}/backups"
 
 - name: Copy reviewed OpenBao deployment files
   ansible.builtin.copy:
-    src: "{{ ductor_render_root }}/services/{{ ductor_service.id }}/{{ item }}"
-    dest: "{{ bao_service_root }}/{{ item }}"
-    owner: "{{ bao_uid }}"
-    group: "{{ bao_gid }}"
+    src: "{{ ductor_render_root }}/services/{{ ductor_service.id }}/{{ item.name }}"
+    dest: "{{ bao_service_root }}/{{ item.name }}"
+    owner: "{{ item.uid }}"
+    group: "{{ item.gid }}"
     mode: '0600'
-  loop: [compose.yaml, server.hcl]
+  loop:
+    - {name: compose.yaml, uid: root, gid: root}
+    - {name: server.hcl, uid: "{{ bao_uid }}", gid: "{{ bao_gid }}"}
 
 - name: Validate rendered OpenBao Compose
   ansible.builtin.command:

@@ -18,7 +18,7 @@
     apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y python3 python3-apt
   when:
     - ductor_python_probe.rc != 0
-    - ductor_action in ['deploy', 'update', 'bootstrap-workers']
+    - ductor_action in ['deploy', 'update', 'bootstrap-workers', 'bootstrap-services']
   changed_when: true
 
 - name: Gather host operating system and resource facts
@@ -86,7 +86,7 @@
     - "{{ ductor_host.data_root }}"
     - "{{ ductor_host.data_root }}/services"
     - "{{ ductor_host.data_root }}/backups"
-  when: ductor_action in ['deploy', 'update', 'bootstrap-workers']
+  when: ductor_action in ['deploy', 'update', 'bootstrap-workers', 'bootstrap-services']
 
 - name: Read the installed Docker engine version
   ansible.builtin.command:
@@ -104,7 +104,7 @@
     - ductor_services | length > 0
     - ductor_action != 'bootstrap-workers'
     - ductor_docker_probe.rc != 0
-    - ductor_action in ['deploy', 'update', 'bootstrap-workers']
+    - ductor_action in ['deploy', 'update', 'bootstrap-workers', 'bootstrap-services']
 
 - name: Validate the reachable Docker daemon
   ansible.builtin.command:

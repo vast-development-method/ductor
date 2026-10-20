@@ -12,6 +12,11 @@ silently modify an existing `vdm-agents` project. Configure a profile with the
 approved network, storage and per-instance CPU, memory and disk limits. Apply
 project aggregate quotas and separate instance-count limits.
 
+Include cached-image space in the pool disk budget, above
+`max_instances × instance_disk_gib`. Deployment checks the actual approved image
+size as well as the reserved instance disks; a pool with no image headroom is
+rejected before it can overrun its quota.
+
 Normal deployment consumes an initialized Incus host with KVM, an HTTPS listener,
 managed network, approved ACL, storage pool and approved source VM image. It
 creates/reconciles the dedicated project, profile, immutable image alias and
@@ -29,6 +34,11 @@ Configure `incus.bootstrap.<host-id>` with `enabled: true`, an approved native
 `network`, `ipv4_address`, `ipv4_nat`, `network_acl` and explicit native ACL
 `ingress`/`egress` allow rules. Supported fresh bootstrap hosts are Ubuntu 24.04
 and Debian 13. The selected package must provide the required Incus APIs.
+
+The runtime requires Incus 6.14 or later plus the actual project/VM/ACL feature
+checks. Incus 6.12 and 6.13 are excluded by the minimum-version gate; approve a
+patched available package rather than reducing the isolation checks to fit an
+older distribution default.
 
 Generate the pool's private client identity, then bootstrap the chosen host:
 
@@ -88,6 +98,32 @@ approved `worker_node_version` and configure its full `image_fingerprint` and
 not replace executing the actual worker runtime check. The generated Crabbox
 setup probe reads `process.versions.node` inside the acquired worker and rejects
 an incompatible runtime before the turn proceeds.
+
+Changing only a local Node environment variable is not an approved platform
+release. The inspected platform build records `manifest/toolchain.env`, including
+`NODE_MAJOR` and its matching `NODESOURCE_SETUP_SHA256`. An approved new platform
+revision must select Node 24, enforce that version during provisioning and verify
+it in the produced image. Its existing provisioner accepts any installed Node
+version at least 20 and its image verification omits a Node-version check, so a
+manifest-only change is insufficient on an already populated base image.
+
+These findings refer to opencode-platform `0.3.0-rc.3`, commit
+[`0f86093`](https://github.com/vast-development-method/opencode-platform/tree/0f86093c8469422b502018e5e4193a840454b6f1).
+Review the corresponding manifest, common provisioner and image-verification
+changes when selecting a later approved release.
+
+Use the existing opencode-platform release pipeline after those version checks
+are implemented and the revision is approved. Its supported TypeScript image
+build entry point is:
+
+```bash
+LOCAL_BUILD_VARIANTS=typescript LOCAL_REQUIRE_CLEAN=true LOCAL_REQUIRE_TAG=true LOCAL_PUBLISH_GITEA=false ./scripts/local-image-release.sh
+```
+
+Run this in the approved opencode-platform checkout, not in Ductor. Ductor adds
+no alternate image builder and does not treat an `.env` Node override as a
+fingerprinted release input. Record the produced image fingerprint, verified
+Node version and download checksums before using it in a worker pool.
 
 The platform's default connected ACL blocks private destinations and inbound
 traffic. That policy cannot be reused unchanged when a private gateway must reach
