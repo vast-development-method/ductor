@@ -107,6 +107,8 @@ def main() -> None:
     parser.add_argument("ca_file")
     parser.add_argument("--disposable-fixture", action="store_true", required=True,
                         help="Explicitly approve the fixed Demo J6 compile in a disposable test deployment")
+    parser.add_argument("--expect-worker-unavailable", action="store_true",
+                        help="Verify the published runtime rejects detached-job planning before mutation")
     options = parser.parse_args()
     config = private_json(options.client_file)
     require(config.get("write_enabled") is True, "The JCB fixture needs its separate scoped compiler identity")
@@ -120,11 +122,25 @@ def main() -> None:
     tool(client, "joomla_permission_approve", {
         "requestId": permission["requestId"], "acknowledgement": permission["acknowledgement"],
     })
-    plan = tool(client, "joomla_action_write_plan", {
+    arguments = {
         "action": "jcb.compile.component", "transport": "api", "idempotencyKey": str(uuid.uuid4()),
         "input": {"options": {"component": DEMO_COMPONENT, "joomla-version": "6",
                                "add-build-date": "2", "build-date": "2026-01-01"}},
-    })
+    }
+    if options.expect_worker_unavailable:
+        result = client.request("tools/call", {"name": "joomla_action_write_plan", "arguments": arguments})
+        failure = result.get("result", {})
+        codes = []
+        for content in failure.get("content", []):
+            if content.get("type") == "text":
+                decoded = json.loads(content["text"])
+                if isinstance(decoded, dict):
+                    codes.append(decoded.get("error", {}).get("code"))
+        require(failure.get("isError") is True and "WORKER_UNAVAILABLE" in codes,
+                "Detached-job planning did not reject the unavailable worker with its native error")
+        print("DETACHED MCP JOB UNAVAILABLE: native planning returned WORKER_UNAVAILABLE before mutation; direct Joomla CLI is tested separately")
+        return
+    plan = tool(client, "joomla_action_write_plan", arguments)
     require(isinstance(plan.get("confirmationToken"), str), "JCB plan omitted its confirmation token")
     applied = tool(client, "joomla_write_apply", {"confirmationToken": plan["confirmationToken"]})
     job_id = applied.get("job", {}).get("jobId")

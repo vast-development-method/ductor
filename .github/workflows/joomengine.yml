@@ -14,17 +14,11 @@ jobs:
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-      - name: Check out the exact JoomEngine worker runtime candidate
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-        with:
-          repository: octoleo/joomengine
-          ref: f87b9ec158b334d00c12728d8483821c6e420d12
-          path: _joomengine
       - name: Check out the exact agent-platform native MCP client
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           repository: vast-development-method/opencode-platform
-          ref: 53e902ba6a4fccdfce1838508309b8fdb91b1cf8
+          ref: bd5f0ef513d706a444b0dfbdc98e45567cb4515a
           path: _platform
       - name: Validate the native enrollment helper and reject unsafe inputs
         run: |
@@ -33,7 +27,8 @@ jobs:
           bash tests/integration/joomengine-bootstrap-input.sh
       - name: Exercise generated service containers and native MCP authorization
         env:
-          JOOMENGINE_TEST_CHECKOUT: ${{ github.workspace }}/_joomengine
+          JOOMENGINE_TEST_IMAGE: octoleo/joomengine:6.2.0-php8.4-apache-mcp@sha256:6844b3ed8009c8a74ed07cab773b36898584bb5e743e3024bb5907bb7e7213af
+          JOOMENGINE_TEST_DATABASE_IMAGE: mariadb:11.4@sha256:250e1609e93c0e6aecf64bfbab2d84d5e89d2481540fe77447ff6c855c3b1873
           JOOMENGINE_TEST_JCB: '1'
           PLATFORM_CHECKOUT: ${{ github.workspace }}/_platform
         run: bash tests/integration/joomengine.sh
