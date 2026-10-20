@@ -120,9 +120,12 @@ def main():
     compose_cmd = ["docker", "compose", "--file", str(compose_path)]
     progress("start production-mode Raft server")
     run(compose_cmd + ["up", "--detach"])
-    endpoint = run(compose_cmd + ["port", "openbao", "8200"]).stdout.strip()
-    check(endpoint.startswith("127.0.0.1:"), "Fixture server must publish only on loopback")
-    base_url = "http://" + endpoint
+    def published_url():
+        endpoint = run(compose_cmd + ["port", "openbao", "8200"]).stdout.strip()
+        check(re.fullmatch(r"127\.0\.0\.1:[1-9][0-9]{0,4}", endpoint),
+              "Fixture server must publish only on one loopback port")
+        return "http://" + endpoint
+    base_url = published_url()
     network = label + "_default"
 
     # This fixture is deliberately loopback-only; do not route through CI proxies.
@@ -141,7 +144,9 @@ def main():
             response = error
         except (TimeoutError, URLError, OSError) as error:
             # Mutating init/unseal requests are never retried blindly.
-            raise RuntimeError(f"OpenBao {method} {route}: transport failure ({type(error).__name__}, timeout {timeout}s)") from None
+            reason = getattr(error, "reason", error)
+            code = getattr(reason, "errno", None)
+            raise RuntimeError(f"OpenBao {method} {route}: transport failure ({type(reason).__name__}, errno={code}, timeout {timeout}s)") from None
         with response:
             raw = response.read()
             check(response.status in codes, f"OpenBao {method} {route} failed (HTTP {response.status})")
@@ -277,7 +282,10 @@ process.stdout.write([...found].sort()[0]);
     failed = resolve([read_id], success=False)
     check(not failed.get("values"), "Resolver returned a secret from a sealed server")
     run(compose_cmd + ["restart", "openbao"])
-    sealed = wait_for(lambda: api("GET", "sys/seal-status"), "Persistent server did not restart")
+    # Docker may allocate a new host port for the fixture's published port 0
+    # after restart. Production manifests use stable, operator-selected ports.
+    base_url = published_url()
+    sealed = wait_for(lambda: api("GET", "sys/seal-status", timeout=3), "Persistent server did not restart")
     check(sealed["initialized"] and sealed["sealed"], "Restart did not preserve initialization and seal state")
     api("POST", "sys/unseal", data={"key": unseal_key})
     wait_for(lambda: api("GET", "sys/health", timeout=3), "Restarted server did not become active")

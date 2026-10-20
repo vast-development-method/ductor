@@ -3,7 +3,8 @@
   hosts: ductor_hosts
   gather_facts: false
   serial: 1
-  any_errors_fatal: true
+  # An unreachable host must not hide status from the rest of the fleet.
+  any_errors_fatal: "{{ ductor_action != 'status' }}"
   tasks:
     - name: Validate transport and operation
       ansible.builtin.assert:
