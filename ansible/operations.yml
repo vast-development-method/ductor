@@ -10,7 +10,7 @@
       ansible.builtin.assert:
         that:
           - ansible_connection == 'ssh'
-          - ductor_action in ['status', 'restart', 'backup']
+          - ductor_action in ['status', 'restart', 'backup', 'joomengine-provision', 'joomengine-migrate-mcp']
         fail_msg: Unsupported operation or transport.
 
     - name: Perform native OpenBao operations
@@ -39,6 +39,14 @@
       register: ductor_worker_status
       changed_when: false
       when: ductor_action == 'status'
+
+    - name: Perform selected JoomEngine operations
+      ansible.builtin.include_role:
+        name: joomengine
+      loop: "{{ ductor_services | selectattr('kind', 'equalto', 'joomengine') | list }}"
+      loop_control:
+        loop_var: ductor_service
+        label: "{{ ductor_service.id }}"
 
     - name: Report worker status
       ansible.builtin.debug:

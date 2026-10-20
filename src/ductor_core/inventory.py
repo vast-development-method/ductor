@@ -38,8 +38,8 @@ def build_service_vm_inventory(config, bundle, render, host_filter=None, service
     """Bootstrap only hypervisors; no SSH attempt to a not-yet-created guest."""
     if host_filter and host_filter not in config["hosts"]:
         raise ValueError(f"Unknown host: {host_filter}")
-    if service_filter and config["services"].get(service_filter, {}).get("kind") != "openclaw":
-        raise ValueError("bootstrap-services --service must select an OpenClaw gateway")
+    if service_filter and config["services"].get(service_filter, {}).get("kind") not in ("openclaw", "joomengine"):
+        raise ValueError("bootstrap-services --service must select an OpenClaw or JoomEngine service")
     selected = [dict(value, id=key) for key, value in config.get("service_vms", {}).items()
                 if (not host_filter or value["hypervisor"] == host_filter)
                 and (not service_filter or value["guest_host"] == config["services"][service_filter]["host"])]

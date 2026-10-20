@@ -73,6 +73,9 @@ def parser():
     put.add_argument("--service", required=True, help="OpenClaw gateway id")
     put.add_argument("--provider", required=True, help="Configured provider key reference")
     put.add_argument("--input-file", required=True, type=Path)
+    joomengine = commands.add_parser("joomengine", help="persistent Joomla MCP service lifecycle").add_subparsers(dest="joomengine_action", required=True)
+    for action in ("credentials", "provision", "migrate-mcp"):
+        joomengine.add_parser(action).add_argument("--service", required=True)
     login = commands.add_parser("login", help="native OpenClaw account sign-in over SSH")
     login.add_argument("--service", required=True)
     login.add_argument("--agent", required=True)
@@ -251,7 +254,7 @@ def render(config, state, host=None, service=None, action=None):
     stage = Path(tempfile.mkdtemp(prefix="render-", dir=state))
     final = state / "rendered"
     try:
-        for name in (("service_vm",) if action == "bootstrap-services" else ("openclaw", "crabbox", "openbao", "service_vm")):
+        for name in (("service_vm",) if action == "bootstrap-services" else ("openclaw", "crabbox", "openbao", "joomengine", "service_vm")):
             module = importlib.import_module(f"ductor_core.{name}")
             getattr(module, f"render_{name}")(config if name == "service_vm" and action != "bootstrap-services" else selected, stage)
         inventory = service_inventory or build_inventory(config, BUNDLE, final, host, service)
@@ -315,6 +318,8 @@ def monitor(config_path, state, interval=30, host=None, service=None, once=False
 def operation(config, state, action, host=None, service=None, stage_only=False):
     if action == "activate" and service and config["services"].get(service, {}).get("kind") != "openclaw":
         raise ValueError("activate --service must select an OpenClaw gateway")
+    if action.startswith("joomengine-") and config["services"].get(service, {}).get("kind") != "joomengine":
+        raise ValueError("JoomEngine operations require --service selecting a JoomEngine service")
     if action in ("status", "restart", "backup"):
         errors = validate(config, integrations=False)
         if errors:
@@ -337,6 +342,19 @@ def operation(config, state, action, host=None, service=None, stage_only=False):
             print(f"Rendered deployment: {rendered}")
         return 0
     verify_ssh_files(inventory)
+    if action in ("deploy", "update", "joomengine-provision"):
+        from .joomengine import read_credentials
+        for entry in inventory["all"]["children"]["ductor_hosts"]["hosts"].values():
+            for service_entry in entry["ductor_services"]:
+                if service_entry["kind"] != "joomengine":
+                    continue
+                sid = service_entry["id"]
+                read_credentials(config, sid)
+                if action == "joomengine-provision":
+                    destination = Path(config["credentials"]["joomengine_client_files"][sid])
+                    private_dir(destination.parent)
+                    if destination.exists() or destination.is_symlink():
+                        check_private_file(destination)
     if action in ("deploy", "update", "activate"):
         for entry in inventory["all"]["children"]["ductor_hosts"]["hosts"].values():
             for service_entry in entry["ductor_services"]:
@@ -371,14 +389,17 @@ def operation(config, state, action, host=None, service=None, stage_only=False):
     env = dict(os.environ, ANSIBLE_CONFIG=str(BUNDLE / "ansible/ansible.cfg"), ANSIBLE_HOST_KEY_CHECKING="True",
                ANSIBLE_HOME=str(private_dir(state / "ansible")), ANSIBLE_LOCAL_TEMP=str(temporary), ANSIBLE_SSH_CONTROL_PATH_DIR=str(controls))
     record(state, action, "running", host=host, service=service)
-    if action in ("deploy", "update", "activate", "bootstrap-workers", "bootstrap-services", "restart", "backup"):
+    if action in ("deploy", "update", "activate", "bootstrap-workers", "bootstrap-services", "restart", "backup", "joomengine-provision", "joomengine-migrate-mcp"):
         with infrastructure_lock(inventory) as held:
             result = held.run(argv, env=env, cwd=BUNDLE, check=False)
     else:
         result = subprocess.run(argv, env=env, cwd=BUNDLE, check=False)
     record(state, action, "passed" if result.returncode == 0 else "failed", returncode=result.returncode, host=host, service=service)
     if result.returncode == 0 and action in ("deploy", "update"):
-        print("Deployment reconciled. Run preflight and activate; live production qualification remains required.")
+        if service and config["services"].get(service, {}).get("kind") == "joomengine":
+            print("JoomEngine services are running independently. Run joomengine provision for the dedicated MCP client; validate the external TLS route before use.")
+        else:
+            print("Deployment reconciled. Run preflight; OpenClaw gateways also require activate. Live production qualification remains required.")
     if result.returncode == 0 and action == "bootstrap-services":
         print("Service VMs provisioned. Enroll each guest SSH key using the fingerprint reported through its verified hypervisor, then deploy services.")
     return result.returncode
@@ -586,6 +607,13 @@ def main(argv=None):
                     print(json.dumps(result, indent=2))
             elif command == "login":
                 return native_login(config, state, args.service, args.agent, args.provider, args.profile)
+            elif command == "joomengine":
+                from .joomengine import create_credentials
+                if args.joomengine_action == "credentials":
+                    require_valid(config)
+                    print(json.dumps(create_credentials(config, args.service), indent=2))
+                else:
+                    return operation(config, state, "joomengine-" + args.joomengine_action, service=args.service)
             else:
                 return operation(config, state, command, getattr(args, "host", None), getattr(args, "service", None), getattr(args, "stage_only", False))
         return 0

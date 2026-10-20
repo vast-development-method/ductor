@@ -80,3 +80,18 @@
         loop_var: ductor_service
         label: "{{ ductor_service.id }}"
       when: ductor_action in ['preflight', 'deploy', 'update', 'activate']
+
+- name: Reconcile persistent JoomEngine MCP services
+  hosts: ductor_hosts
+  gather_facts: false
+  any_errors_fatal: true
+  serial: 1
+  tasks:
+    - name: Configure the selected JoomEngine service
+      ansible.builtin.include_role:
+        name: joomengine
+      loop: "{{ ductor_services | selectattr('kind', 'equalto', 'joomengine') | list }}"
+      loop_control:
+        loop_var: ductor_service
+        label: "{{ ductor_service.id }}"
+      when: ductor_action in ['preflight', 'deploy', 'update']

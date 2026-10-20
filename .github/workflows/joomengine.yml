@@ -1,0 +1,23 @@
+name: JoomEngine native integration
+on:
+  pull_request:
+  push:
+    branches: [main, 'feature/**']
+permissions:
+  contents: read
+concurrency:
+  group: joomengine-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  native-service:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Validate the native enrollment helper and reject unsafe inputs
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y php-cli jq
+          bash tests/integration/joomengine-bootstrap-input.sh
+      - name: Exercise generated service containers and native MCP authorization
+        run: bash tests/integration/joomengine.sh

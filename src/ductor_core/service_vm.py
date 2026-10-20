@@ -54,10 +54,10 @@ def validate_service_vms(config: dict) -> list[str]:
             errors.append(f"{label}.guest_host requires an enrolled services host with non-root SSH user, port 22 and become=true")
         service = services.get(vm.get("service"), {})
         service = service if isinstance(service, dict) else {}
-        if service.get("kind") != "openclaw" or service.get("host") != vm.get("guest_host") or not service.get("enabled"):
-            errors.append(f"{label}.service must reference an enabled OpenClaw service on guest_host")
+        if service.get("kind") not in ("openclaw", "joomengine") or service.get("host") != vm.get("guest_host") or not service.get("enabled"):
+            errors.append(f"{label}.service must reference an enabled OpenClaw or JoomEngine service on guest_host")
         if any(isinstance(s, dict) and s.get("enabled") and s.get("host") == vm.get("guest_host") and key != vm.get("service") for key, s in services.items()):
-            errors.append(f"{label}.guest_host must be dedicated to this OpenClaw service")
+            errors.append(f"{label}.guest_host must be dedicated to this service")
         if not _ports(vm.get("service_ports")) or vm.get("service_ports") != [service.get("port")]:
             errors.append(f"{label}.service_ports must contain only the referenced service's fixed port")
         if service.get("bind_address") != vm.get("ipv4_address") or guest.get("address") != vm.get("ipv4_address"):
