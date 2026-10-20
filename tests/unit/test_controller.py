@@ -94,6 +94,38 @@ class ControllerTests(unittest.TestCase):
             cli.trust_host(self.config, self.root, 'control', 'SHA256:' + 'a' * 43)
         self.assertFalse((self.root / 'known-hosts').exists())
 
+    def test_bootstrap_and_bao_selection_do_not_require_unrelated_knowledge_files(self):
+        self.config['knowledge']['source_dir'] = str(self.root / 'not-created-yet')
+        self.assertTrue(validate(self.config))
+        directory, _ = cli.render(self.config, self.root / 'state', service='bao')
+        self.assertTrue((directory / 'services/bao/server.hcl').exists())
+        self.assertFalse((directory / 'services/agents').exists())
+        directory, _ = cli.render(self.config, self.root / 'state', action='bootstrap-workers')
+        self.assertTrue((directory / 'incus/workers/project.json').exists())
+        with self.assertRaisesRegex(ValueError, '--service'):
+            cli.render(self.config, self.root / 'state', service='agents', action='bootstrap-workers')
+
+    def test_ssh_trust_file_cannot_be_writable_by_another_user(self):
+        write_private(self.root / 'ssh-key', 'private test key')
+        write_private(self.root / 'known-hosts', 'host ssh-ed25519 example')
+        inventory = build_inventory(self.config, cli.BUNDLE, self.root)
+        verify_ssh_files(inventory)
+        (self.root / 'known-hosts').chmod(0o666)
+        with self.assertRaisesRegex(ValueError, 'not writable'):
+            verify_ssh_files(inventory)
+
+    def test_reserved_localhost_cannot_redirect_controller_credential_tasks(self):
+        self.config['hosts']['localhost'] = self.config['hosts'].pop('control')
+        self.assertTrue(any('reserved Ansible' in error for error in validate(self.config)))
+
+    @patch('ductor_core.cli.subprocess.run')
+    def test_incus_identity_never_overwrites_key_with_certificate(self, run):
+        pool = self.config['incus']['pools']['workers']
+        pool['client_certificate_file'] = pool['client_key_file']
+        with self.assertRaisesRegex(ValueError, 'distinct'):
+            cli.incus_identity(self.config, 'workers')
+        run.assert_not_called()
+
     def test_symlink_state_and_secret_outputs_refused(self):
         outside = self.root / 'outside'
         outside.mkdir()

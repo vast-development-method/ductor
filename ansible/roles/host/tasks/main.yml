@@ -37,6 +37,27 @@
       - ansible_connection == 'ssh'
     fail_msg: Host OS, architecture, SSH transport, or declared physical resource capacity failed validation.
 
+- name: Reject redirected deployment paths before any privileged filesystem changes
+  ansible.builtin.command:
+    argv:
+      - /usr/bin/python3
+      - -c
+      - |
+        import os, pathlib, stat, sys
+        for value in sys.argv[1:]:
+            path = pathlib.Path(value)
+            for component in [*reversed(path.parents), path]:
+                try:
+                    info = component.lstat()
+                except FileNotFoundError:
+                    continue
+                if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+                    raise SystemExit('Deployment path contains a symlink or non-directory: ' + str(component))
+      - "{{ ductor_host.data_root }}"
+      - "{{ ductor_host.data_root }}/services"
+      - "{{ ductor_host.data_root }}/backups"
+  changed_when: false
+
 - name: Find the filesystem containing the data root without creating it
   ansible.builtin.command:
     argv:

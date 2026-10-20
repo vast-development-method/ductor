@@ -15,8 +15,10 @@ jobs:
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - name: Build the pinned gateway with verified Crabbox
+        id: gateway
         run: docker build --build-arg TARGETARCH=amd64 --tag ductor-openclaw:test service-images/openclaw
       - name: Validate generated config against native OpenClaw
         run: bash tests/integration/openclaw.sh
       - name: Test native OpenBao Agent and the bundled Vault resolver
+        if: ${{ !cancelled() && steps.gateway.outcome == 'success' }}
         run: bash tests/integration/openbao.sh

@@ -106,6 +106,12 @@ class CrabboxContractTests(unittest.TestCase):
         config["incus"]["pools"]["workers"]["scheduler"] = "round-robin"
         self.assertTrue(any("unsupported" in e for e in validate_pools(config)))
 
+    def test_client_and_server_identity_paths_cannot_overwrite_each_other(self):
+        config = example()
+        pool = config["incus"]["pools"]["workers"]
+        pool["client_certificate_file"] = pool["client_key_file"]
+        self.assertTrue(any("distinct" in e for e in validate_pools(config)))
+
 
 if __name__ == "__main__":
     unittest.main()

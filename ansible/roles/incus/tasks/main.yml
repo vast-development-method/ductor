@@ -38,7 +38,7 @@
 - name: Require initialized Incus with VM support
   ansible.builtin.assert:
     that: ductor_kvm.stat.exists
-    fail_msg: "Prepare this host using opencode-platform bootstrap first; Ductor does not initialize storage, change package sources, or silently downgrade VMs to containers."
+    fail_msg: "This host has no /dev/kvm. Enable hardware virtualization or nested KVM on the selected worker host before retrying; Ductor will not downgrade approved VMs to containers."
   when: ductor_pools | length > 0
 
 - name: Configure each explicitly selected worker pool

@@ -8,8 +8,14 @@ ductor_repo=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)
 ductor_image=${DUCTOR_OPENCLAW_TEST_IMAGE:-ductor-openclaw:test}
 ductor_smoke=$(mktemp -d "${TMPDIR:-/tmp}/ductor-openclaw-smoke.XXXXXXXX")
 ductor_gateway_container="ductor-openclaw-smoke-$$"
+ductor_fixture_owner="$(id -u):$(id -g)"
+ductor_chown=(chown)
+if [[ $(id -u) != 0 ]]; then
+  ductor_chown=(sudo -n chown)
+fi
 cleanup() {
   docker rm -f "$ductor_gateway_container" >/dev/null 2>&1 || true
+  "${ductor_chown[@]}" -R "$ductor_fixture_owner" "$ductor_smoke" 2>/dev/null || true
   rm -rf -- "$ductor_smoke"
 }
 trap cleanup EXIT
@@ -63,8 +69,14 @@ for name, config in (("oauth", oauth), ("vault", base), ("team", team)):
     path.chmod(0o700)
 PY
 
+# The production image owns its private home/cache as node1000. Exercise that
+# exact identity, including ownership checks, rather than the CI runner's UID.
+for variant in oauth vault team; do
+  "${ductor_chown[@]}" -R 1000:1000 "$ductor_smoke/$variant"
+done
+
 ductor_options=(--rm --network none --cap-drop ALL --security-opt no-new-privileges:true
-  --user "$(id -u):$(id -g)"
+  --user 1000:1000
   --env HOME=/home/node --env OPENCLAW_HOME=/home/node
   --env OPENCLAW_STATE_DIR=/home/node/.openclaw
   --env OPENCLAW_CONFIG_DIR=/home/node/.openclaw
@@ -98,7 +110,11 @@ assert re.search(r"(?<![\d.])0\.79\.0(?![\d.])", (p / "crabbox-version.txt").rea
 PY
 
 for variant in oauth vault team; do
-  native "$variant" config validate --json > "$ductor_smoke/$variant-validation.json"
+  echo "Validating native OpenClaw schema: $variant"
+  if ! native "$variant" config validate --json > "$ductor_smoke/$variant-validation.json"; then
+    cat "$ductor_smoke/$variant-validation.json" >&2
+    exit 1
+  fi
 done
 
 # Doctor imports modules without activation: no provider call, Vault request,

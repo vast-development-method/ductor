@@ -75,6 +75,10 @@ class OpenClawRendererTests(unittest.TestCase):
         self.config["agents"][1]["auth_profiles"] = ["openai:review"]
         self.assertTrue(any("multiple accounts" in error for error in validate_openclaw(self.config)))
 
+    def test_rejects_image_identity_that_cannot_own_private_runtime_cache(self):
+        self.config["services"]["agents"]["uid"] = 1001
+        self.assertTrue(any("uid=1000" in error for error in validate_openclaw(self.config)))
+
     def test_rejects_unsupported_native_codex_and_missing_pool(self):
         self.config["agents"][0]["runtime"] = "codex"
         self.config["services"]["agents"]["required_pool"] = "missing"
