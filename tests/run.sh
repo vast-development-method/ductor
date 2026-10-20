@@ -9,6 +9,7 @@ if command -v shellcheck >/dev/null; then shellcheck src/ductor install.sh tests
 if command -v ansible-playbook >/dev/null; then
   ANSIBLE_CONFIG="$PWD/ansible/ansible.cfg" ansible-playbook -i 'localhost,' ansible/site.yml --syntax-check
   ANSIBLE_CONFIG="$PWD/ansible/ansible.cfg" ansible-playbook -i 'localhost,' ansible/operations.yml --syntax-check
+  ANSIBLE_CONFIG="$PWD/ansible/ansible.cfg" ansible-playbook -i 'localhost,' ansible/service-vms.yml --syntax-check
   ductor_syntax=$(mktemp)
   trap 'rm -f "$ductor_syntax"' EXIT
   python3 - "$ductor_syntax" <<'PYTHON'

@@ -3,6 +3,41 @@
   ansible.builtin.set_fact:
     ductor_gateway_dir: "{{ ductor_host.data_root }}/services/{{ ductor_service.id }}"
 
+- name: Require Gateway publishing on an actual selected host interface
+  ansible.builtin.assert:
+    that:
+      - ductor_service.bind_address not in ['0.0.0.0', '::']
+      - ductor_service.bind_address in (['127.0.0.1', '::1'] + (ansible_facts.all_ipv4_addresses | default([])) + (ansible_facts.all_ipv6_addresses | default([])))
+    fail_msg: "Gateway bind_address must select an IP assigned to this host; wildcard publishing is not supported."
+
+- name: Guard service root and executable Compose definition before use
+  ansible.builtin.command:
+    argv:
+      - python3
+      - -c
+      - "{{ lookup('ansible.builtin.file', role_path ~ '/files/guard-managed-paths.py') }}"
+    stdin: "{{ {'root': ductor_gateway_dir, 'files': ['compose.yaml']} | to_json }}"
+  changed_when: false
+
+- name: Inspect prior gateway deployment before maintenance
+  ansible.builtin.stat:
+    path: "{{ ductor_gateway_dir }}/compose.yaml"
+    follow: false
+  register: ductor_existing_gateway_compose
+
+- name: Stop existing Gateway before staging or traversing agent-writable paths
+  ansible.builtin.command:
+    argv: [docker, compose, --file, compose.yaml, stop, --timeout, '30', gateway]
+    chdir: "{{ ductor_gateway_dir }}"
+  when:
+    - ductor_action in ['deploy', 'update', 'activate']
+    - ductor_existing_gateway_compose.stat.exists
+  changed_when: true
+
+- name: Guard all generated destinations before privileged mutation
+  ansible.builtin.include_tasks: guard-managed.yml
+  when: ductor_action in ['deploy', 'update', 'activate']
+
 - name: Inspect an existing gateway deployment without changing it
   ansible.builtin.include_tasks: preflight.yml
   when: ductor_action == 'preflight'

@@ -30,6 +30,20 @@
         label: "{{ ductor_service.id }}"
       when: ductor_action in ['preflight', 'deploy', 'update']
 
+- name: Verify isolated service VM boundaries
+  hosts: ductor_hosts
+  gather_facts: false
+  any_errors_fatal: true
+  tasks:
+    - name: Check the existing service VM without changing it
+      ansible.builtin.include_role:
+        name: service_vm
+      loop: "{{ ductor_service_vms }}"
+      loop_control:
+        loop_var: ductor_service_vm
+        label: "{{ ductor_service_vm.id }}"
+      when: ductor_action == 'preflight'
+
 - name: Reconcile independent Incus worker projects
   hosts: ductor_hosts
   gather_facts: false

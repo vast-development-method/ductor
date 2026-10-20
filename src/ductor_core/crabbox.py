@@ -185,7 +185,7 @@ def pool_project(name: str, pool: dict) -> dict:
         "restricted.devices.disk": "managed", "restricted.devices.nic": "managed",
         "restricted.networks.access": pool["network"], "restricted.storage-pools.access": pool["storage_pool"],
         "restricted.devices.proxy": "block", "restricted.virtual-machines.lowlevel": "allow",
-        "restricted.virtual-machines.nesting": "block", "restricted.snapshots": "block",
+        "restricted.snapshots": "block",
         "limits.containers": "0", "limits.instances": str(pool["max_instances"]),
         "limits.virtual-machines": str(pool["max_instances"]), "limits.cpu": str(pool["cpus"]),
         "limits.memory": f"{pool['memory_mib']}MiB", "limits.disk": f"{pool['disk_gib']}GiB",

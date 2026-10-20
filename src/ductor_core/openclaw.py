@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import hashlib
+import ipaddress
 import shlex
 import re
 from pathlib import Path
@@ -30,6 +31,10 @@ SOURCES = [
     "docs/cli/models.md",
     "docs/auth-credential-semantics.md",
     "docs/gateway/team-server.md",
+    "src/config/zod-schema.gateway.ts",
+    "src/gateway/server/ws-connection/connect-policy.ts",
+    "docs/gateway/security/network-exposure.md",
+    "docs/cli/devices.md",
     "src/config/zod-schema.mcp-server.ts",
     "src/agents/agent-bundle-mcp-names.ts",
     "docs/gateway/config-tools/tool-policy.md",
@@ -47,6 +52,26 @@ WORKER_NODE_PROBE = "node -e " + shlex.quote(
 def _services(config: dict[str, Any]):
     return [(sid, service) for sid, service in config.get("services", {}).items()
             if service.get("kind") == "openclaw" and service.get("enabled", True)]
+
+
+def _https_origin(value: str) -> bool:
+    """An exact HTTPS origin, without credentials, wildcards, or URL components."""
+    try:
+        parsed = urlsplit(value)
+        port = parsed.port  # Validate malformed or out-of-range explicit ports too.
+        return bool(parsed.scheme == "https" and parsed.hostname and port != 0
+                    and parsed.username is None and parsed.password is None
+                    and not parsed.path and not parsed.query
+                    and not parsed.fragment and "*" not in value
+                    and "?" not in value and "#" not in value and "%" not in parsed.netloc
+                    and not any(char.isspace() or char == "\\" for char in value))
+    except (TypeError, ValueError):
+        return False
+
+
+def _service_vm(config: dict[str, Any], service: dict[str, Any]) -> dict[str, Any] | None:
+    return next((vm for vm in config.get("service_vms", {}).values()
+                 if vm.get("guest_host") == service.get("host") and service.get("host")), None)
 
 
 def _knowledge(config: dict[str, Any]) -> tuple[str, dict[str, str]]:
@@ -110,8 +135,31 @@ def validate_openclaw(config: dict[str, Any]) -> list[str]:
             errors.append(f"{prefix}.agents must contain unique explicit agent ids")
         if service.get("required_pool") not in pools:
             errors.append(f"{prefix}.required_pool must name an Incus pool; local fallback is unsupported")
-        if not service.get("url", "").startswith("https://"):
-            errors.append(f"{prefix}.url must be the externally reachable HTTPS Gateway origin")
+        if not _https_origin(service.get("url", "")):
+            errors.append(f"{prefix}.url must be an exact HTTPS Gateway origin without credentials, path, query, fragment, or wildcard")
+        origins = service.get("allowed_origins", [service.get("url", "")])
+        if not origins or len(origins) != len(set(origins)) or any(not _https_origin(origin) for origin in origins):
+            errors.append(f"{prefix}.allowed_origins must contain unique exact HTTPS origins")
+        for proxy in service.get("trusted_proxies", []):
+            try:
+                network = ipaddress.ip_network(proxy, strict=True)
+                minimum = 24 if network.version == 4 else 64
+                if network.prefixlen < minimum or network.network_address.is_unspecified or network.is_multicast:
+                    raise ValueError("broad or unusable proxy network")
+            except ValueError:
+                errors.append(f"{prefix}.trusted_proxies must use controlled proxy IPs or narrow CIDRs (IPv4 /24+; IPv6 /64+)")
+        if service.get("bind_address") in {"0.0.0.0", "::"}:
+            errors.append(f"{prefix}.bind_address must select one host interface; wildcard Gateway publishing is unsupported")
+        service_vm = _service_vm(config, service)
+        if service_vm:
+            if service.get("bind_address") != service_vm.get("ipv4_address"):
+                errors.append(f"{prefix}.bind_address must equal its dedicated service VM ipv4_address")
+            if service.get("team") is not None:
+                errors.append(f"{prefix}.team is unsupported for a dedicated service VM: retain native token auth and manual device pairing; apply SSO only at the external proxy")
+            if origins != [service.get("url")]:
+                errors.append(f"{prefix}.allowed_origins must contain only its public HTTPS url on a dedicated service VM")
+            if not service.get("trusted_proxies"):
+                errors.append(f"{prefix}.trusted_proxies requires the actual external proxy source for its dedicated service VM")
         provider_keys = service.get("provider_keys", {})
         mcp_servers = service.get("mcp_servers", {})
         for name, server in mcp_servers.items():
@@ -298,9 +346,12 @@ def _build(config: dict[str, Any], sid: str, service: dict[str, Any]) -> tuple[d
         "mode": "local", "bind": "lan", "port": 18789,
         "publicOrigin": service["url"],
         "trustedProxies": service.get("trusted_proxies", []),
-        "controlUi": {"enabled": True, "allowedOrigins": service.get("allowed_origins", [service["url"]])},
+        "controlUi": {"enabled": True, "allowedOrigins": service.get("allowed_origins", [service["url"]]),
+                      "dangerouslyAllowHostHeaderOriginFallback": False},
+        "allowRealIpFallback": False,
+        "tailscale": {"mode": "off"},
         "auth": {"mode": "token", "token": {"source": "file", "provider": "gateway-auth", "id": "value"}},
-        "nodes": {"pairing": {"autoApproveLocal": False, "sshVerify": False}},
+        "nodes": {"pairing": {"autoApproveLocal": False, "autoApproveCidrs": [], "sshVerify": False}},
     }
     secrets: dict[str, Any] = {"providers": {"gateway-auth": {
         "source": "file", "path": "/run/secrets/gateway-token", "mode": "singleValue"}}}
@@ -311,7 +362,8 @@ def _build(config: dict[str, Any], sid: str, service: dict[str, Any]) -> tuple[d
             "password": {"source": "file", "provider": "gateway-auth", "id": "value"},
             "identityScopes": {user: ["operator.admin"] for user in team["admin_users"]},
             "trustedProxy": {"userHeader": team["user_header"], "requiredHeaders": team["required_headers"],
-                             "allowUsers": team["allow_users"], "allowLoopback": False},
+                             "allowUsers": team["allow_users"], "allowLoopback": False,
+                             "deviceAutoApprove": {"enabled": False}},
         }
         gateway["roles"] = {"default": "observer", "definitions": {
             "observer": {"sessions": {"others": "view"}, "agents": [], "scopes": ["operator.read"]},
@@ -319,6 +371,8 @@ def _build(config: dict[str, Any], sid: str, service: dict[str, Any]) -> tuple[d
                        "scopes": ["operator.read", "operator.write", "operator.approvals", "operator.questions"]},
             "administrator": {"sessions": {"others": "write"}, "agents": "*", "scopes": ["operator.admin"]},
         }}
+    gateway["auth"].update({"allowTailscale": False, "rateLimit": {
+        "maxAttempts": 10, "windowMs": 60000, "lockoutMs": 300000, "exemptLoopback": False}})
     plugins: dict[str, Any] = {"entries": {
         "crabbox": {"enabled": True}, "memory-core": {"enabled": True},
         "memory-wiki": {"enabled": True, "config": {
@@ -372,6 +426,7 @@ def _build(config: dict[str, Any], sid: str, service: dict[str, Any]) -> tuple[d
             [["models", "status", "--agent", aid, "--json", "--check"] for aid in roster] +
             [["mcp", "doctor", name, "--probe"] for name in service.get("mcp_servers", {})],
         "limitations": [
+            "Gateway token holders share owner-level authority, agent workspaces, and knowledge. Device approval is browser admission, not hostile-tenant or per-person data isolation. Use separate Gateways for different trust boundaries.",
             "One account per provider/Gateway is supported. A bare global auth order constrains missing-account selection; activation rejects undeclared provider accounts and clears per-agent order overrides. Administrators can still change credentials or policy.",
             "Native login is required before activation. Activation restores rendered config after login metadata edits, verifies exact stored profile identity/type, clears stored order overrides, and checks model readiness. No placeholder credentials are generated.",
             "Review is a bounded separate-agent workflow convention. A mandatory merge/deployment approval gate is not implemented by these prompts.",
@@ -385,7 +440,7 @@ def _build(config: dict[str, Any], sid: str, service: dict[str, Any]) -> tuple[d
         ],
     }
     if not team:
-        activation["limitations"].append("Token authentication is one trusted-owner domain; per-person identity and roles require an identity-aware proxy and team configuration.")
+        activation["limitations"].append("Native token authentication and manual browser device pairing remain required. External proxy SSO can add admission control but does not replace native credentials or create Gateway roles.")
     else:
         activation["limitations"].append("The reverse proxy must authenticate identities, overwrite identity headers, and isolate the private origin; header presence is not JWT signature verification. Assign administrator roles with the native users.setRole workflow.")
         activation["team_bootstrap"] = {
@@ -393,6 +448,19 @@ def _build(config: dict[str, Any], sid: str, service: dict[str, Any]) -> tuple[d
             "list_argv": ["users", "list", "--json"],
             "assign_method": "users.setRole",
             "assign_params": {"profileId": "<verified-profile-id>", "role": "administrator"},
+        }
+    if _service_vm(config, service):
+        activation["browser_access"] = {
+            "url": service["url"], "private_address": service["bind_address"], "port": service["port"],
+            "auth": "token", "trust_boundary": "trusted teammates with shared owner authority",
+            "devices_list_argv": ["devices", "list", "--json"],
+            "devices_approve_argv": ["devices", "approve", "<verified-request-id>"],
+            "requirements": [
+                "Terminate TLS at the operator-controlled external proxy; overwrite forwarded headers and restrict the VM port to the explicitly declared ingress sources.",
+                "If proxy SSO is enabled, separately qualify machine admission for native worker enrollment and WebSockets; workers do not have browser SSO sessions. Native Gateway authentication must remain enforced on machine routes.",
+                "Each browser supplies the Gateway token and receives explicit approval after the operator verifies its exact pending device request.",
+                "Keep hypervisor administration SSH keys and service-VM project credentials on the deployment controller. The Gateway receives only the separate worker-project Incus identity and scoped OpenBao AppRole.",
+            ],
         }
     return result, activation
 
@@ -432,6 +500,10 @@ def render_openclaw(config: dict[str, Any], output_dir: str | Path) -> list[Path
             name: hashlib.sha256(content.encode("utf-8")).hexdigest()
             for name, content in knowledge.items()
         }
+        activation["managed_state_paths"] = sorted(
+            str(path.relative_to(destination)) for path in written
+            if path.is_relative_to(destination / "state")
+        )
         if config.get("knowledge", {}).get("repository"):
             activation["knowledge_repository"] = config["knowledge"]["repository"]
         activation["knowledge_commands"] = [["wiki", "init", "--agent", owner]] + [

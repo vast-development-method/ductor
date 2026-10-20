@@ -8,7 +8,7 @@ import re
 
 ID = re.compile(r"^[a-z][a-z0-9-]{0,47}$")
 IMAGE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9./_-]*(?::[a-zA-Z0-9._-]+|@sha256:[a-f0-9]{64})$")
-ROOT_KEYS = {"schema_version", "name", "hosts", "services", "incus", "agents", "model_accounts", "knowledge", "credentials", "runtime"}
+ROOT_KEYS = {"schema_version", "name", "hosts", "services", "service_vms", "incus", "agents", "model_accounts", "knowledge", "credentials", "runtime"}
 HOST_KEYS = {"address", "port", "user", "identity_file", "known_hosts_file", "become", "data_root", "resources", "roles"}
 RESOURCE_KEYS = {"cpus", "memory_mib", "disk_gib", "reserve_cpus", "reserve_memory_mib", "reserve_disk_gib"}
 SERVICE_KEYS = {"kind", "host", "enabled", "image", "bind_address", "port", "url", "cpus", "memory_mib", "disk_gib", "trusted_proxies", "allowed_origins", "required_pool", "agents", "provider_keys", "team", "ca_file", "uid", "gid", "openbao_service", "kv_mount", "gateway_token_file", "mcp_servers", "unseal_shares", "unseal_threshold"}
@@ -16,7 +16,7 @@ SERVICE_KEYS = {"kind", "host", "enabled", "image", "bind_address", "port", "url
 
 def empty_config(name="company"):
     return {"schema_version": 2, "name": name, "hosts": {}, "services": {},
-            "incus": {"pools": {}}, "agents": [], "model_accounts": {},
+            "incus": {"pools": {}}, "service_vms": {}, "agents": [], "model_accounts": {},
             "runtime": {"max_concurrent": 4, "max_children": 2, "max_depth": 2, "run_timeout_seconds": 1800},
             "knowledge": {"source_dir": ""}, "credentials": {}}
 
@@ -166,6 +166,23 @@ def validate(config, integrations=True):
             budget = pool.get(resource, 0)
             if type(budget) is int and count * per_instance > budget:
                 fail(f"incus.pools.{key}: max_instances × instance_{resource} exceeds pool {resource} budget")
+    # Charge a service VM to its physical host; services inside it are charged
+    # separately to the guest budget, which must leave room for its operating OS.
+    for key, value in mapping(config.get("service_vms", {}), "service_vms").items():
+        identifier(key, "service VM id")
+        vm = mapping(value, f"service_vms.{key}")
+        hypervisor = vm.get("hypervisor")
+        guest = vm.get("guest_host")
+        if not isinstance(hypervisor, str) or not isinstance(guest, str):
+            fail(f"service_vms.{key}: hypervisor and guest_host must be enrolled host ids")
+            continue
+        for resource in ("cpus", "memory_mib", "disk_gib"):
+            amount = positive(vm.get(resource), f"service_vms.{key}.{resource}")
+            if hypervisor in allocations:
+                allocations[hypervisor][resource] += amount
+            guest_budget = hosts.get(guest, {}).get("resources", {}).get(resource)
+            if type(guest_budget) is int and guest_budget > amount:
+                fail(f"service_vms.{key}: guest {resource} budget exceeds its VM allocation")
     for host_id, allocated in allocations.items():
         resource = hosts[host_id].get("resources", {})
         for key, amount in allocated.items():
@@ -212,6 +229,10 @@ def validate(config, integrations=True):
     for key in credentials:
         if any(word in key.lower() for word in ("password", "secret_value", "api_key", "access_token")):
             fail(f"credentials.{key}: store secret values in protected files or OpenBao, not desired state")
+    if not errors:
+        # This contract is structural and applies to operations as well as deploy.
+        from .service_vm import validate_service_vms
+        errors.extend(validate_service_vms(config))
     if integrations and not errors:
         for module_name, function in (("openclaw", "validate_openclaw"), ("crabbox", "validate_pools"), ("openbao", "validate_openbao")):
             module = importlib.import_module(f"ductor_core.{module_name}")

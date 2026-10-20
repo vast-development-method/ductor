@@ -1,0 +1,14 @@
+---
+- name: Load exact generated managed-state destinations
+  ansible.builtin.set_fact:
+    ductor_guard_activation: "{{ lookup('ansible.builtin.file', ductor_render_root ~ '/services/' ~ ductor_service.id ~ '/activation.json') | from_json }}"
+
+- name: Reject symlinks at every managed destination and ancestor
+  ansible.builtin.command:
+    argv:
+      - python3
+      - -c
+      - "{{ lookup('ansible.builtin.file', role_path ~ '/files/guard-managed-paths.py') }}"
+    stdin: "{{ {'root': ductor_gateway_dir, 'directories': ['state', 'auth', 'crabbox-state', 'candidate', 'secrets', 'image', 'crabbox/config', 'crabbox/bin', 'crabbox/incus/' ~ ductor_service.required_pool ~ '/servercerts'], 'files': ['compose.yaml', 'activation.json', 'managed-sources.json', 'image/Dockerfile', 'candidate/openclaw.json', 'state/openclaw.json', 'secrets/gateway-token', 'crabbox/config/' ~ ductor_service.required_pool ~ '.yaml', 'crabbox/bin/crabbox-' ~ ductor_service.required_pool, 'crabbox/incus/' ~ ductor_service.required_pool ~ '/config.yml', 'crabbox/incus/' ~ ductor_service.required_pool ~ '/client.crt', 'crabbox/incus/' ~ ductor_service.required_pool ~ '/client.key', 'crabbox/incus/' ~ ductor_service.required_pool ~ '/servercerts/' ~ ductor_service.required_pool ~ '.crt'] + ductor_guard_activation.managed_state_paths, 'import_trees': ['state/company-knowledge'] + (ductor_service.agents | map('regex_replace', '^(.*)$', 'state/workspaces/\\1/company') | list)} | to_json }}"
+  changed_when: false
+

@@ -26,6 +26,12 @@ guests over SSH. Workers connect to the gateway using OpenClaw's own protocol.
 OpenBao Agent renews credentials without Ductor. These runtime connections are
 not routed through the deployment controller.
 
+The main gateway can be provisioned as a dedicated Incus service VM with its own
+project, private address and controlled network paths. Its worker certificate is
+restricted to a different project and cannot administer the service VM through
+that project authorization. Ductor retains the hypervisor/guest SSH deployment
+authority on the controller. See the [service-VM runbook](service-vm.md).
+
 ## Explicit placement
 
 Each gateway chooses an explicit required worker pool. Pool-specific launchers
@@ -46,6 +52,11 @@ Separate gateways, credentials and worker projects are required where accounts
 or teams must be isolated. A model subscription does not automatically authorize
 unattended use; native sign-in and the provider's supported execution path remain
 necessary.
+
+The dedicated service-VM route retains native token authentication and manual
+browser-device approval behind the operator's TLS proxy. Organizational SSO can
+restrict admission at that proxy. It does not convert a shared gateway token
+into per-user tenancy, account isolation or independent attribution.
 
 The gateway holds the Incus client identity and therefore has infrastructure
 authority within the configured project. That identity, SSH administrator keys,

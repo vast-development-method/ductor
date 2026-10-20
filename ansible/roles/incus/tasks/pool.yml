@@ -41,6 +41,11 @@
       - (ductor_source_image.stdout | from_json)[0].properties.get('user.ductor.openclaw.node_version', '') == ductor_pool.worker_node_version
     fail_msg: "Approved VM image is absent, has the wrong host architecture, or lacks matching user.ductor.openclaw.node_version attestation. Existing opencode-platform Node 22 images cannot run OpenClaw v2026.10.5. Rebuild and verify the image with Node 24.16+ or 26.1+, record its property and immutable fingerprint, then retry. Ductor will not mutate the platform image."
 
+- name: Admit the approved image as well as every maximum-sized root volume
+  ansible.builtin.assert:
+    that: ((ductor_source_image.stdout | from_json)[0].size | int) + (ductor_pool.max_instances | int * ductor_pool.instance_disk_gib | int * 1073741824) <= (ductor_pool.disk_gib | int * 1073741824)
+    fail_msg: "Pool disk quota must cover the approved cached image plus all max_instances root volumes. Increase the explicit pool/host disk budget before deployment; Incus counts images in limits.disk."
+
 - name: Read existing projects
   ansible.builtin.command:
     argv: [incus, project, list, --format, json]

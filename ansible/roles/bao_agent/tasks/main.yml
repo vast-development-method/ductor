@@ -16,6 +16,55 @@
       - gateway_bao_refs.secret_id_file is defined
     fail_msg: "Provision this gateway AppRole with the provision-credentials action before deploying its secret agent."
 
+- name: Guard the executable Gateway definition before maintenance
+  ansible.builtin.command:
+    argv:
+      - python3
+      - -c
+      - "{{ lookup('ansible.builtin.file', role_path ~ '/../openbao/files/guard-managed-paths.py') }}"
+    stdin: "{{ {'root': gateway_root, 'files': ['compose.yaml']} | to_json }}"
+  changed_when: false
+
+- name: Inspect existing Gateway Compose definition
+  ansible.builtin.stat:
+    path: "{{ gateway_root }}/compose.yaml"
+    follow: false
+  register: gateway_bao_compose
+
+- name: Identify whether the existing deployment has a secret agent
+  ansible.builtin.command:
+    argv: [docker, compose, --file, "{{ gateway_root }}/compose.yaml", config, --services]
+  register: gateway_bao_existing_services
+  changed_when: false
+  when: ductor_action in ['deploy', 'update'] and gateway_bao_compose.stat.exists
+
+- name: Stop the existing secret agent before changing its writable sink
+  ansible.builtin.command:
+    argv: [docker, compose, --file, "{{ gateway_root }}/compose.yaml", stop, --timeout, '30', bao-agent]
+  changed_when: true
+  when:
+    - ductor_action in ['deploy', 'update']
+    - gateway_bao_compose.stat.exists
+    - "'bao-agent' in (gateway_bao_existing_services.stdout_lines | default([]))"
+
+- name: Guard all secret-agent destinations and their ancestors
+  ansible.builtin.command:
+    argv:
+      - python3
+      - -c
+      - "{{ lookup('ansible.builtin.file', role_path ~ '/../openbao/files/guard-managed-paths.py') }}"
+    stdin: "{{ item | to_json }}"
+  changed_when: false
+  loop:
+    - root: "{{ gateway_root }}"
+      directories: [bao-auth]
+      files: [agent.hcl, bao-ca.pem, bao-auth/role-id, bao-auth/secret-id]
+    - root: "/run/ductor/{{ ductor_service.id }}"
+      directories: [bao]
+      files: [bao/token]
+    - root: /etc/tmpfiles.d
+      files: ["ductor-bao-{{ ductor_service.id }}.conf"]
+
 - name: Inspect controller credential files without disclosing contents
   ansible.builtin.stat:
     path: "{{ item }}"
@@ -37,6 +86,15 @@
     fail_msg: "AppRole reference must be an existing private regular file (0400 or 0600)."
   loop: "{{ gateway_bao_ref_stats.results }}"
   no_log: true
+
+- name: Keep the gateway service root under operator ownership
+  ansible.builtin.file:
+    path: "{{ gateway_root }}"
+    state: directory
+    owner: root
+    group: root
+    mode: '0700'
+  when: ductor_action in ['deploy', 'update']
 
 - name: Create secret-agent directories
   ansible.builtin.file:

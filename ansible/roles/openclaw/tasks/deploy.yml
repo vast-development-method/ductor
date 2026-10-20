@@ -1,4 +1,11 @@
 ---
+- name: Require the supported upstream container identity
+  ansible.builtin.assert:
+    that:
+      - ductor_service.uid | default(1000) | int == 1000
+      - ductor_service.gid | default(1000) | int == 1000
+    fail_msg: "The pinned OpenClaw image uses UID/GID 1000 and a private home/cache; other identities require a separately qualified image."
+
 - name: Resolve gateway deployment paths
   ansible.builtin.set_fact:
     ductor_gateway_dir: "{{ ductor_host.data_root }}/services/{{ ductor_service.id }}"
@@ -51,16 +58,6 @@
     owner: "{{ ductor_service.uid | default(1000) }}"
     group: "{{ ductor_service.gid | default(1000) }}"
     mode: "0600"
-  diff: false
-
-- name: Stage only managed company and agent instruction files
-  ansible.builtin.copy:
-    src: "{{ ductor_render_root }}/services/{{ ductor_service.id }}/state/"
-    dest: "{{ ductor_gateway_dir }}/state/"
-    owner: "{{ ductor_service.uid | default(1000) }}"
-    group: "{{ ductor_service.gid | default(1000) }}"
-    mode: "0600"
-    directory_mode: "0700"
   diff: false
 
 - name: Stage activation instructions
@@ -146,6 +143,14 @@
   register: ductor_gateway_image_build
   changed_when: true
 
+- name: Verify the actual Gateway version matches the supported configuration contract
+  ansible.builtin.command:
+    argv: [docker, compose, --file, compose.yaml, run, --rm, --no-deps, --entrypoint, node, gateway, dist/index.js, --version]
+    chdir: "{{ ductor_gateway_dir }}"
+  register: ductor_gateway_version
+  changed_when: false
+  failed_when: ductor_gateway_version.rc != 0 or (ductor_gateway_version.stdout | regex_search('(?<![0-9.])2026\\.10\\.5(?![0-9.])')) is none
+
 - name: Establish renewable credentials before checking enabled secret references
   ansible.builtin.command:
     argv: [docker, compose, --file, compose.yaml, up, --detach, --wait, --wait-timeout, '120', bao-agent]
@@ -214,4 +219,13 @@
   register: ductor_gateway_crabbox_version
   changed_when: false
   failed_when: ductor_gateway_crabbox_version.rc != 0 or '0.79.0' not in ductor_gateway_crabbox_version.stdout
+
+- name: Stop Gateway before replacing authoritative company inputs
+  ansible.builtin.command:
+    argv: [docker, compose, --file, compose.yaml, stop, --timeout, '30', gateway]
+    chdir: "{{ ductor_gateway_dir }}"
+  changed_when: true
+
+- name: Reconcile only Ductor-owned company import directories
+  ansible.builtin.include_tasks: stage-knowledge.yml
 

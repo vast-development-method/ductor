@@ -1,0 +1,47 @@
+---
+- name: Read actual service project
+  ansible.builtin.command:
+    argv: [incus, project, show, "{{ ductor_service_vm.project }}"]
+  changed_when: false
+  register: ductor_sv_verify_project
+
+- name: Read actual service network
+  ansible.builtin.command:
+    argv: [incus, network, show, "{{ ductor_service_vm.network }}", --project, default]
+  changed_when: false
+  register: ductor_sv_verify_network
+
+- name: Read actual service ACL
+  ansible.builtin.command:
+    argv: [incus, network, acl, show, "{{ ductor_sv_identity.acl }}", --project, default]
+  changed_when: false
+  register: ductor_sv_verify_acl
+
+- name: Read actual service profile
+  ansible.builtin.command:
+    argv: [incus, profile, show, "{{ ductor_sv_identity.profile }}", --project, "{{ ductor_service_vm.project }}"]
+  changed_when: false
+  register: ductor_sv_verify_profile
+
+- name: Read the expanded persistent VM configuration
+  ansible.builtin.command:
+    argv: [incus, config, show, "{{ ductor_service_vm.instance }}", --project, "{{ ductor_service_vm.project }}", --expanded]
+  changed_when: false
+  register: ductor_sv_verify_instance
+
+- name: Require native isolation, fixed resources and controller-independent autostart
+  ansible.builtin.assert:
+    that:
+      - ((ductor_sv_verify_project.stdout | from_yaml).config | combine(ductor_sv_project.config)) == (ductor_sv_verify_project.stdout | from_yaml).config
+      - ((ductor_sv_verify_network.stdout | from_yaml).config | combine(ductor_sv_network.config)) == (ductor_sv_verify_network.stdout | from_yaml).config
+      - (ductor_sv_verify_network.stdout | from_yaml).type == 'bridge'
+      - (ductor_sv_verify_network.stdout | from_yaml).managed
+      - (ductor_sv_verify_acl.stdout | from_yaml).config == ductor_sv_acl.config
+      - (ductor_sv_verify_acl.stdout | from_yaml).ingress == ductor_sv_acl.ingress
+      - (ductor_sv_verify_acl.stdout | from_yaml).egress == ductor_sv_acl.egress
+      - (ductor_sv_verify_profile.stdout | from_yaml).config == ductor_sv_profile.config
+      - (ductor_sv_verify_profile.stdout | from_yaml).devices == ductor_sv_profile.devices
+      - ((ductor_sv_verify_instance.stdout | from_yaml).config | combine(ductor_sv_profile.config)) == (ductor_sv_verify_instance.stdout | from_yaml).config
+      - (ductor_sv_verify_instance.stdout | from_yaml).devices == ductor_sv_profile.devices
+      - (ductor_sv_verify_instance.stdout | from_yaml).profiles == [ductor_sv_identity.profile]
+    fail_msg: Service VM isolation, ACL, fixed profile or native autostart differs from reviewed configuration. preflight never repairs drift.

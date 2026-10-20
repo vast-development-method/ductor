@@ -1,5 +1,7 @@
 """Regressions at boundaries that otherwise admit host execution or wrong accounts."""
 import json
+import os
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -47,6 +49,8 @@ class OpenClawRendererTests(unittest.TestCase):
         self.assertEqual(settings["binary"], "/usr/local/lib/ductor/crabbox-workers")
         self.assertFalse(settings["warmImage"])
         self.assertNotIn("class", settings)
+        self.assertIn("process.versions.node", settings["setup"])
+        self.assertIn("process.exit(78)", settings["setup"])
         self.assertEqual(worker["preparedPool"]["maxTotal"], 0)
 
     def test_native_bounds_and_separate_readonly_reviewer(self):
@@ -71,6 +75,45 @@ class OpenClawRendererTests(unittest.TestCase):
         self.assertNotIn("access", json.dumps(native["auth"]))
         self.assertEqual(native["gateway"]["auth"]["token"]["source"], "file")
 
+    def test_browser_auth_has_no_origin_identity_or_pairing_shortcuts(self):
+        native, _ = self.render()
+        gateway = native["gateway"]
+        self.assertEqual(gateway["auth"]["mode"], "token")
+        self.assertFalse(gateway["auth"]["allowTailscale"])
+        self.assertFalse(gateway["auth"]["rateLimit"]["exemptLoopback"])
+        self.assertFalse(gateway["allowRealIpFallback"])
+        self.assertFalse(gateway["controlUi"]["dangerouslyAllowHostHeaderOriginFallback"])
+        self.assertNotIn("dangerouslyDisableDeviceAuth", gateway["controlUi"])
+        self.assertEqual(gateway["nodes"]["pairing"], {
+            "autoApproveLocal": False, "autoApproveCidrs": [], "sshVerify": False})
+
+    def test_rejects_wildcard_origins_and_broad_proxy_trust(self):
+        service = self.config["services"]["agents"]
+        service["allowed_origins"] = ["*"]
+        service["trusted_proxies"] = ["0.0.0.0/0", "10.0.0.0/8"]
+        errors = validate_openclaw(self.config)
+        self.assertTrue(any("allowed_origins" in error for error in errors))
+        self.assertTrue(any("trusted_proxies" in error for error in errors))
+        for invalid in ("https://agents.example.org/path", "https://agents.example.org?token=secret",
+                        "https://user:password@agents.example.org", "http://agents.example.org"):
+            service["url"] = invalid
+            self.assertTrue(any(".url " in error for error in validate_openclaw(self.config)))
+
+    def test_dedicated_vm_uses_exact_private_bind_token_and_manual_browser_pairing(self):
+        service = self.config["services"]["agents"]
+        service.update({"host": "gateway-vm", "bind_address": "10.50.0.10", "port": 18789})
+        self.config["service_vms"] = {"main": {"guest_host": "gateway-vm", "ipv4_address": "10.50.0.10"}}
+        native, activation = self.render()
+        self.assertEqual(native["gateway"]["auth"]["mode"], "token")
+        self.assertEqual(activation["browser_access"]["port"], 18789)
+        self.assertEqual(activation["browser_access"]["devices_approve_argv"], ["devices", "approve", "<verified-request-id>"])
+        service["bind_address"] = "0.0.0.0"
+        self.assertTrue(any("ipv4_address" in error for error in validate_openclaw(self.config)))
+        service["bind_address"] = "10.50.0.10"
+        service["team"] = {"user_header": "x-user", "required_headers": ["x-verified"],
+                           "allow_users": ["owner"], "admin_users": ["owner"]}
+        self.assertTrue(any("manual device pairing" in error for error in validate_openclaw(self.config)))
+
     def test_rejects_multiple_accounts_on_one_gateway_to_avoid_profile_drift_fallback(self):
         self.config["agents"][1]["auth_profiles"] = ["openai:review"]
         self.assertTrue(any("multiple accounts" in error for error in validate_openclaw(self.config)))
@@ -78,6 +121,26 @@ class OpenClawRendererTests(unittest.TestCase):
     def test_rejects_image_identity_that_cannot_own_private_runtime_cache(self):
         self.config["services"]["agents"]["uid"] = 1001
         self.assertTrue(any("uid=1000" in error for error in validate_openclaw(self.config)))
+
+    def test_privileged_stage_guard_rejects_managed_symlink_and_accepts_unmanaged_repo_links(self):
+        script = Path(__file__).resolve().parents[2] / "ansible/roles/openclaw/files/guard-managed-paths.py"
+        workspace = self.root / "remote/state/workspaces/lead"
+        workspace.mkdir(parents=True)
+        outside = self.root / "outside.md"
+        outside.write_text("unchanged")
+        (workspace / "repo-link").symlink_to(outside)
+        manifest = {"root": str(self.root / "remote"), "files": ["state/workspaces/lead/AGENTS.md"]}
+        def guarded():
+            return subprocess.run(["python3", str(script)], input=json.dumps(manifest), text=True, capture_output=True)
+        self.assertEqual(guarded().returncode, 0)
+        (workspace / "AGENTS.md").symlink_to(outside)
+        refused = guarded()
+        self.assertNotEqual(refused.returncode, 0)
+        self.assertIn("symlink", refused.stderr)
+        self.assertEqual(outside.read_text(), "unchanged")
+        (workspace / "AGENTS.md").unlink()
+        os.link(outside, workspace / "AGENTS.md")
+        self.assertIn("hard-linked", guarded().stderr)
 
     def test_rejects_unsupported_native_codex_and_missing_pool(self):
         self.config["agents"][0]["runtime"] = "codex"

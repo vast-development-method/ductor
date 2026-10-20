@@ -1,0 +1,25 @@
+---
+- name: Provision isolated service VMs through verified hypervisor SSH
+  hosts: ductor_hosts
+  gather_facts: false
+  any_errors_fatal: true
+  serial: 1
+  tasks:
+    - name: Require the explicit service VM action
+      ansible.builtin.assert:
+        that:
+          - ductor_action == 'bootstrap-services'
+          - ansible_connection == 'ssh'
+          - ductor_services | length == 0
+          - ductor_pools | length == 0
+          - ductor_service_vms | length > 0
+    - name: Check hypervisor operating system and resource budgets
+      ansible.builtin.include_role:
+        name: host
+    - name: Reconcile isolated service VMs
+      ansible.builtin.include_role:
+        name: service_vm
+      loop: "{{ ductor_service_vms }}"
+      loop_control:
+        loop_var: ductor_service_vm
+        label: "{{ ductor_service_vm.id }}"

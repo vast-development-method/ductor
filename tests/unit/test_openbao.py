@@ -2,6 +2,8 @@ import copy
 import json
 import os
 from pathlib import Path
+import subprocess
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -48,6 +50,28 @@ class OpenBaoTests(unittest.TestCase):
         os.link(path, link)
         with self.assertRaises(OpenBaoError):
             _read_private(str(path), "token")
+
+    def test_remote_guard_rejects_linked_destination_and_ancestor(self):
+        helper = Path(__file__).parents[2] / "ansible/roles/openbao/files/guard-managed-paths.py"
+        managed = self.root / "managed"
+        managed.mkdir()
+        target = self.root / "outside"
+        target.write_text("untouched")
+        manifest = {"root": str(managed), "files": ["token"]}
+        def guard():
+            return subprocess.run([sys.executable, str(helper)], input=json.dumps(manifest),
+                                  text=True, capture_output=True).returncode
+        self.assertEqual(guard(), 0)
+        (managed / "token").symlink_to(target)
+        self.assertNotEqual(guard(), 0)
+        (managed / "token").unlink()
+        os.link(target, managed / "token")
+        self.assertNotEqual(guard(), 0)
+        (managed / "token").unlink()
+        managed.rmdir()
+        managed.symlink_to(self.root, target_is_directory=True)
+        self.assertNotEqual(guard(), 0)
+        self.assertEqual(target.read_text(), "untouched")
 
     def test_validation_rejects_insecure_endpoint_and_cross_gateway_secret(self):
         self.assertEqual(validate_openbao(self.config), [])

@@ -5,6 +5,52 @@ URLs, persistent paths and image versions. All host administration uses verified
 SSH. OpenBao credential operations use its native HTTPS API and protected files.
 The external reverse proxy and certificates remain operator-managed.
 
+## Controller downtime and reconnect
+
+Ductor is an operations client. Closing it, stopping its container or losing the
+controller host does not stop service containers, interrupt OpenBao Agent token
+renewal or take ownership of running workers. Those responsibilities belong to
+the installed native services. Their state and restart policies live on their
+own hosts, not in a Ductor process.
+
+When Ductor returns, open the menu or run `status` using the persisted desired
+configuration and verified SSH inputs. It reconnects to inspect current live
+state. Starting the controller or selecting status must not redeploy, restart,
+reinitialize or reconcile services. An explicit deployment/update/restart action
+is required to change them.
+
+For ongoing infrastructure visibility, run:
+
+```bash
+ductor monitor --interval 30
+ductor monitor --service team --once
+```
+
+`monitor` polls the same read-only status path, re-reads persisted configuration
+on each cycle and releases its controller lock between polls. A failed connection
+is reported; it does not trigger a repair or restart. Ctrl-C stops only the
+monitor. Use OpenClaw's UI for agent conversations and current work; infrastructure
+status is not a second task scheduler.
+
+The monitor's `passed`/`failed` observation result reports whether the status
+operation completed, not whether every service is healthy. Read the actual native
+states: for example, an OpenBao server can be successfully observed as sealed.
+Monitoring does not add alert delivery or automatic recovery, and an offline
+controller does not capture the status polls it missed.
+
+Use a [portable controller ZIP](controller-portability.md) to set up another
+Ductor installation with the same configuration and referenced keys. Concurrent
+monitors are supported; explicit mutation operations use remote host locks.
+Configuration changes are propagated deliberately, not automatically synchronized.
+
+Service Compose projects use native `restart: unless-stopped`; the dedicated
+service VM uses Incus boot autostart. This is native restart behavior, not a claim
+that every application failure is automatically repairable. In particular,
+OpenBao's default Shamir seal still needs operator unseal after its server restarts.
+That requirement comes from the OpenBao seal configuration, not Ductor being
+offline. Recovery material and a tested recovery procedure must remain available
+independently of the controller.
+
 ## OpenBao first
 
 Deploy OpenBao separately before gateways that need it. The rendered server runs
