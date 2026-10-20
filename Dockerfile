@@ -37,6 +37,9 @@ ENV PATH="/opt/ductor/.venv/bin:${PATH}" \
     DUCTOR_CONTAINER=1 \
     DUCTOR_STATE_DIR=/var/lib/ductor \
     DUCTOR_CONFIG=/var/lib/ductor/config.json \
+    ANSIBLE_HOME=/tmp/ductor-ansible \
+    ANSIBLE_LOCAL_TEMP=/tmp/ductor-ansible/tmp \
+    ANSIBLE_SSH_CONTROL_PATH_DIR=/tmp/ductor-ansible/cp \
     ANSIBLE_CONFIG=/opt/ductor/ansible/ansible.cfg
 WORKDIR /var/lib/ductor
 STOPSIGNAL SIGTERM

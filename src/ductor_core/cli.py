@@ -228,6 +228,12 @@ def render(config, state, host=None, service=None, action=None):
             module = importlib.import_module(f"ductor_core.{name}")
             getattr(module, f"render_{name}")(selected, stage)
         inventory = build_inventory(config, BUNDLE, final, host, service)
+        if action == "bootstrap-workers":
+            entries = inventory["all"]["children"]["ductor_hosts"]["hosts"]
+            worker_entries = {key: value for key, value in entries.items() if value["ductor_pools"]}
+            for value in worker_entries.values():
+                value["ductor_services"] = []
+            inventory["all"]["children"]["ductor_hosts"]["hosts"] = worker_entries
         save_inventory(inventory, stage)
         for path in stage.rglob("*"):
             if path.is_symlink():
@@ -277,6 +283,24 @@ def operation(config, state, action, host=None, service=None, stage_only=False):
             print(f"Rendered deployment: {rendered}")
         return 0
     verify_ssh_files(inventory)
+    if action in ("deploy", "update", "activate"):
+        for entry in inventory["all"]["children"]["ductor_hosts"]["hosts"].values():
+            for service_entry in entry["ductor_services"]:
+                if service_entry["kind"] != "openclaw":
+                    continue
+                sid = service_entry["id"]
+                token = service_entry.get("gateway_token_file") or config.get("credentials", {}).get("gateway_token_files", {}).get(sid)
+                if not token:
+                    raise ValueError(f"Configure a private gateway_token_files reference for {sid}")
+                check_private_file(token)
+                pool = config["incus"]["pools"][service_entry["required_pool"]]
+                check_private_file(pool["client_key_file"])
+                if service_entry.get("provider_keys") or service_entry.get("openbao_service"):
+                    refs = config.get("credentials", {}).get("openbao_approles", {}).get(sid, {})
+                    for field in ("role_id_file", "secret_id_file"):
+                        if not refs.get(field):
+                            raise ValueError(f"Provision OpenBao AppRole credential references for {sid}")
+                        check_private_file(refs[field])
     executable = shutil.which("ansible-playbook")
     if not executable:
         sibling = Path(sys.executable).parent / "ansible-playbook"
@@ -287,7 +311,10 @@ def operation(config, state, action, host=None, service=None, stage_only=False):
     playbook = "site.yml" if action in ("plan", "deploy", "update", "preflight", "activate", "bootstrap-workers") else "operations.yml"
     argv = [executable, "-i", str(rendered / "inventory.json"), str(BUNDLE / "ansible" / playbook),
             "--extra-vars", json.dumps({"ductor_action": action, "ductor_activate": not stage_only})]
-    env = dict(os.environ, ANSIBLE_CONFIG=str(BUNDLE / "ansible/ansible.cfg"), ANSIBLE_HOST_KEY_CHECKING="True")
+    temporary = private_dir(state / "ansible-tmp")
+    controls = private_dir(state / "ssh-control")
+    env = dict(os.environ, ANSIBLE_CONFIG=str(BUNDLE / "ansible/ansible.cfg"), ANSIBLE_HOST_KEY_CHECKING="True",
+               ANSIBLE_HOME=str(private_dir(state / "ansible")), ANSIBLE_LOCAL_TEMP=str(temporary), ANSIBLE_SSH_CONTROL_PATH_DIR=str(controls))
     record(state, action, "running", host=host, service=service)
     result = subprocess.run(argv, env=env, cwd=BUNDLE, check=False)
     record(state, action, "passed" if result.returncode == 0 else "failed", returncode=result.returncode, host=host, service=service)

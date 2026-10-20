@@ -37,8 +37,9 @@
       - (ductor_source_image.stdout | from_json | length) == 1
       - (ductor_source_image.stdout | from_json)[0].fingerprint == ductor_pool.image_fingerprint
       - (ductor_source_image.stdout | from_json)[0].type == 'virtual-machine'
+      - (ductor_source_image.stdout | from_json)[0].architecture == ansible_facts.architecture
       - (ductor_source_image.stdout | from_json)[0].properties.get('user.ductor.openclaw.node_version', '') == ductor_pool.worker_node_version
-    fail_msg: "Approved VM image is absent or lacks matching user.ductor.openclaw.node_version attestation. Existing opencode-platform Node 22 images cannot run OpenClaw v2026.10.5. Rebuild and verify the image with Node 24.16+ or 26.1+, record its property and immutable fingerprint, then retry. Ductor will not mutate the platform image."
+    fail_msg: "Approved VM image is absent, has the wrong host architecture, or lacks matching user.ductor.openclaw.node_version attestation. Existing opencode-platform Node 22 images cannot run OpenClaw v2026.10.5. Rebuild and verify the image with Node 24.16+ or 26.1+, record its property and immutable fingerprint, then retry. Ductor will not mutate the platform image."
 
 - name: Read existing projects
   ansible.builtin.command:

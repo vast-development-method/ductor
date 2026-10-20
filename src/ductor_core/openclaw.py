@@ -103,6 +103,8 @@ def validate_openclaw(config: dict[str, Any]) -> list[str]:
             errors.append(f"runtime.{key} must be an integer between {low} and {high}")
     for sid, service in services:
         prefix = f"services.{sid}"
+        if service.get("uid", 1000) != 1000 or service.get("gid", 1000) != 1000:
+            errors.append(f"{prefix}: the pinned OpenClaw image requires uid=1000 and gid=1000 for its private home/cache ownership")
         selected = service.get("agents", [])
         if not selected or len(selected) != len(set(selected)):
             errors.append(f"{prefix}.agents must contain unique explicit agent ids")
