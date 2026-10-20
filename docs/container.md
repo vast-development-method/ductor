@@ -7,9 +7,16 @@ does not stop the deployed services.
 An optional monitoring mode keeps this operations client polling status. It does
 not take over the services' runtime lifecycle.
 
-The image repository is `ghcr.io/vast-development-method/ductor`. Use a published
-version or commit tag and record the resolved image digest for the deployment.
-A version in `VERSION` is not proof that its release image has been published.
+The image repository is `ghcr.io/vast-development-method/ductor`. Compose defaults
+to `ghcr.io/vast-development-method/ductor:latest`. Each explicit v2 release
+publishes `latest` alongside its version and commit-SHA tags, after both amd64 and
+arm64 images pass their checks. All three tags refer to the same multi-architecture
+image. `latest` follows the most recently published release image, including
+release candidates; branch and pull-request builds do not move it.
+
+Set `DUCTOR_IMAGE` to a published version or digest when you want a fixed image.
+A version in `VERSION` is not proof that its release image has been published;
+`latest` becomes available when a release is published by this workflow.
 
 ## Persistent controller inputs
 
@@ -39,10 +46,10 @@ credential/recovery outputs there. In particular, host-key enrollment cannot
 write to the read-only inputs mount. Protect the state directory and its backups
 as secrets even though desired configuration contains only secret references.
 
-Select an available reviewed image and run:
+Use the latest published release image and run:
 
 ```bash
-export DUCTOR_IMAGE=ghcr.io/vast-development-method/ductor:2.0.0-rc.1
+export DUCTOR_IMAGE=ghcr.io/vast-development-method/ductor:latest
 docker compose -f compose.ductor.yaml run --rm ductor setup
 docker compose -f compose.ductor.yaml run --rm ductor validate
 docker compose -f compose.ductor.yaml run --rm ductor preflight
@@ -100,7 +107,17 @@ credentials and is unencrypted; use private transfer and storage.
 
 ## Controller upgrades
 
-Choose an explicit new image version or digest, pull it, and run the same Compose
-command with the same bind mounts. Back up controller state first. Container
-upgrades do not change service versions automatically; service changes remain
-explicit desired-configuration updates followed by Ductor's `update` action.
+Pull the new `latest` image, then run the same Compose command with the same bind
+mounts. You can also select an explicit version or digest through `DUCTOR_IMAGE`.
+Back up controller state first:
+
+```bash
+docker compose -f compose.ductor.yaml pull ductor
+docker compose -f compose.ductor.yaml run --rm ductor --version
+```
+
+For a running monitor, recreate it with
+`docker compose -f compose.ductor.yaml -f compose.monitor.yaml up -d` after pulling.
+Pulling an image does not replace an already running container. Controller upgrades
+do not change service versions automatically; service changes remain explicit
+desired-configuration updates followed by Ductor's `update` action.

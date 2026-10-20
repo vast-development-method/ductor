@@ -1,7 +1,7 @@
 name: ductor-controller
 services:
   ductor:
-    image: ${DUCTOR_IMAGE:-ghcr.io/vast-development-method/ductor:2.0.0-rc.1}
+    image: ${DUCTOR_IMAGE:-ghcr.io/vast-development-method/ductor:latest}
     user: "${DUCTOR_UID:-0}:${DUCTOR_GID:-0}"
     # Run interactively: docker compose -f compose.ductor.yaml run --rm ductor
     # It is an operations tool, not an always-running scheduler or gateway.
