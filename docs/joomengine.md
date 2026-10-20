@@ -153,14 +153,25 @@ TLS certificate and private files. When `PLATFORM_CHECKOUT` names the pinned
 opencode-platform checkout, the same service is exercised by its actual
 `vdm-joomla-mcp read-test` client before and after recreation. Its token remains
 in a mode-`0600` file and diagnostic evidence remains private on the test runner.
-With `JOOMENGINE_TEST_JCB=1`, a separate compiler identity explicitly approves a
-compile of the installer-provided Demo J6, observes the durable job from a new
-session, checks confirmation replay safety, and downloads and verifies the
-resulting archives by SHA-256, ZIP integrity and Joomla manifest. It does not
-install the result. Test credentials, containers and artifacts are removed on
-exit. `JOOMENGINE_TEST_CHECKOUT` can select an exact upstream source checkout for
-candidate worker-runtime builds; production images still require registry
-digests. Full JCB jobs require an image with PHP `pcntl_fork`, `posix_setsid` and
-`proc_open` available; MCP discovery alone does not verify that worker runtime.
+JoomEngine remains an independent, general-purpose upstream service. Ductor
+consumes the published image by digest; it does not build a platform-specific
+variant or require an upstream change. Its existing Joomla CLI exposes MCP
+commands and the native `componentbuilder:compile:component` command.
+
+With `JOOMENGINE_TEST_JCB=1`, CI discovers the installed CLI catalogue and invokes
+the existing compiler as the trusted local `www-data` operator, then verifies
+the generated archives. This deliberate local test has the service filesystem's
+authority; it does not give an agent Docker access or bypass the scoped HTTP
+identity. It compiles the pinned installer's Demo fixture without installation.
+
+CI separately probes the installed MCP component's detached-job capability. If
+available, a separate HTTP compiler identity explicitly approves the compile,
+observes its durable job from a new session, verifies confirmation replay safety,
+and checks downloaded archives by SHA-256, ZIP integrity and Joomla manifest.
+If that capability is unavailable, CI requires the native
+`WORKER_UNAVAILABLE` planning response before any mutation and reports that
+specific limitation. Native CLI availability and compilation are still tested;
+they are not inferred from detached-worker support. Test credentials, containers
+and artifacts are removed on exit.
 Production Incus routing, external TLS and
 backup restoration still require validation against the actual infrastructure.

@@ -28,15 +28,6 @@ database_digest=$(docker image inspect --format '{{index .RepoDigests 0}}' "$dat
 joomla_image="${joomla_tag%@*}@${joomla_digest##*@}"
 database_image="${database_tag%@*}@${database_digest##*@}"
 printf 'Testing pinned images: %s %s\n' "$joomla_image" "$database_image"
-if [[ -n ${JOOMENGINE_TEST_CHECKOUT:-} ]]; then
-    context="$JOOMENGINE_TEST_CHECKOUT/images/jcb6.2.0/j6.1.4/php8.4/apache-mcp"
-    test -f "$context/Dockerfile"
-    docker build --pull --tag joomengine-mcp-worker-ci:source "$context"
-    JOOMENGINE_TEST_IMAGE_ID=$(docker image inspect --format '{{.Id}}' joomengine-mcp-worker-ci:source)
-    [[ $JOOMENGINE_TEST_IMAGE_ID =~ ^sha256:[a-f0-9]{64}$ ]]
-    export JOOMENGINE_TEST_IMAGE_ID
-    printf 'Testing source-qualified worker image: %s\n' "$JOOMENGINE_TEST_IMAGE_ID"
-fi
 openssl req -x509 -newkey rsa:2048 -nodes -days 1 -subj /CN=joomla.test \
     -addext subjectAltName=DNS:joomla.test -keyout "$work/key.pem" -out "$work/ca.crt" >/dev/null 2>&1
 chmod 600 "$work/key.pem"
@@ -65,11 +56,6 @@ for key, value in credentials.items():
     if os.environ.get('GITHUB_ACTIONS') == 'true':
         print('::add-mask::' + value)
 manifest = json.loads((root / 'compose.yaml').read_text())
-# Candidate upstream images are built from a separately pinned checkout in CI.
-# Use the immutable local image ID only in this disposable test; production
-# validation continues to require an official registry digest reference.
-if os.environ.get('JOOMENGINE_TEST_IMAGE_ID'):
-    manifest['services']['joomla']['image'] = os.environ['JOOMENGINE_TEST_IMAGE_ID']
 manifest['services']['joomla']['extra_hosts'] = ['joomla.test:host-gateway']
 manifest['services']['joomla']['volumes'].append({'type':'bind','source':str(work/'ca.crt'),'target':'/usr/local/share/ca-certificates/ductor-ci.crt','read_only':True})
 (root / 'compose.yaml').write_text(json.dumps(manifest))
@@ -152,6 +138,18 @@ if [[ ${JOOMENGINE_TEST_JCB:-0} == 1 ]]; then
     sudo cp "$root/compiler/client.json" "$work/compiler.json"
     sudo chown "$(id -u):$(id -g)" "$work/compiler.json"
     chmod 600 "$work/compiler.json"
-    python3 tests/integration/joomengine-jcb-probe.py "$work/compiler.json" "$work/ca.crt" --disposable-fixture
+    # Ask the installed component about its own detached-worker capability.
+    # This is separate from the ordinary native Joomla CLI, which needs no fork.
+    printf '%s' '{"protocol":"joomengine-worker/1","operation":"job.probe"}' |
+        "${compose[@]}" exec -T --user www-data joomla php \
+            /var/www/html/administrator/components/com_joomengine_mcp/cli/job.php > "$work/job-runtime.json"
+    jq -e '.protocol == "joomengine-worker/1" and (.available | type == "boolean")' "$work/job-runtime.json" >/dev/null
+    job_options=()
+    if ! jq -e '.available == true' "$work/job-runtime.json" >/dev/null; then
+        job_options+=(--expect-worker-unavailable)
+    fi
+    python3 tests/integration/joomengine-jcb-probe.py "$work/compiler.json" "$work/ca.crt" \
+        --disposable-fixture "${job_options[@]}"
+    bash tests/integration/joomengine-cli-compile.sh "$root/compose.yaml" "$work/native-cli"
 fi
 printf 'PASS: native Joomla MCP identity, permissions, private TLS, persistence and restart\n'
