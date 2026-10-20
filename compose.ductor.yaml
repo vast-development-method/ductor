@@ -1,31 +1,35 @@
 name: ductor-controller
 services:
   ductor:
-    image: ${DUCTOR_IMAGE:-ghcr.io/vast-development-method/ductor:0.1.0-rc.1}
-    restart: unless-stopped
-    command: [serve]
-    # Linux Docker Engine: sibling service loopback endpoints remain reachable.
-    # Broker listens directly on DUCTOR_BROKER_PORT; do not add ports: here.
-    network_mode: host
+    image: ${DUCTOR_IMAGE:-ghcr.io/vast-development-method/ductor:2.0.0-rc.1}
+    user: "${DUCTOR_UID:-0}:${DUCTOR_GID:-0}"
+    # Run interactively: docker compose -f compose.ductor.yaml run --rm ductor
+    # It is an operations tool, not an always-running scheduler or gateway.
+    command: [menu]
+    stdin_open: true
+    tty: true
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
     environment:
-      DUCTOR_CONTAINER: "1"
+      DUCTOR_CONTAINER: '1'
       DUCTOR_STATE_DIR: /var/lib/ductor
-      INCUS_CONF: /var/lib/ductor/incus
-      DUCTOR_BROKER_LISTEN_ADDRESS: ${DUCTOR_BROKER_LISTEN_ADDRESS:-0.0.0.0}
-      DUCTOR_BROKER_PORT: ${DUCTOR_BROKER_PORT:-2222}
-      DUCTOR_REAPER_INTERVAL: ${DUCTOR_REAPER_INTERVAL:-30}
+      DUCTOR_CONFIG: /var/lib/ductor/config.json
+      HOME: /var/lib/ductor
     volumes:
-      # The SAME absolute path must exist on the daemon host and in this
-      # container: generated sibling service Compose files bind files below it.
       - type: bind
-        source: /var/lib/ductor
+        source: ${DUCTOR_STATE_PATH:?Set an existing absolute private controller state directory}
         target: /var/lib/ductor
-      - type: bind
-        source: /var/run/docker.sock
-        target: /var/run/docker.sock
         bind:
           create_host_path: false
-    stop_grace_period: 45s
+      - type: bind
+        source: ${DUCTOR_INPUTS_PATH:?Set an existing absolute private SSH and credential input directory}
+        target: /run/ductor-inputs
+        read_only: true
+        bind:
+          create_host_path: false
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,size=128m,mode=1777
     pids_limit: 256
     mem_limit: ${DUCTOR_CONTROLLER_MEMORY:-512m}
     cpus: ${DUCTOR_CONTROLLER_CPUS:-1.0}
@@ -33,4 +37,4 @@ services:
       driver: json-file
       options:
         max-size: 10m
-        max-file: "3"
+        max-file: '3'

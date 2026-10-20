@@ -1,0 +1,5 @@
+---
+# Only a missing Docker installation is installed. Existing engines are checked,
+# never upgraded as a side effect of a service deployment.
+ductor_docker_engine_version: '29.9.1'
+ductor_docker_compose_version: '5.6.0'

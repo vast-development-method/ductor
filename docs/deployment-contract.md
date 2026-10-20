@@ -1,51 +1,56 @@
-# Deployment and runtime ownership
+# Deployment contract
 
-This branch aligns a fresh installation with the following contract. No existing
-deployment or data migration is assumed.
+Ductor v2 targets a fresh installation. It replaces the initial Paperclip-centric
+prototype; it does not migrate an existing prototype database or running broker.
 
-## Ductor
+## Operator inputs
 
-Ductor installs and configures the harness, monitors service health, and performs
-explicit service and self updates. Its wizard collects SSH hosts, verified host
-keys, credential references, service domains and ports, storage paths, resource
-budgets, and the initial Paperclip addon configuration.
+The saved desired configuration identifies:
 
-Every service host is administered through SSH, including the server on which
-Ductor happens to run. The Ductor container has no Docker socket mount and no
-incoming agent broker. The controller can parse Compose locally; deployment and
-Docker Engine preparation happen on the selected SSH host.
+- SSH hosts, verified host-key files and private-key references;
+- service host assignments, images, bind addresses, ports and public URLs;
+- absolute host storage paths and CPU, memory and disk budgets;
+- Incus pools, approved images, profiles, quotas and maximum instance counts;
+- gateways, their required pools and the agents assigned to each;
+- named model accounts, allowed delegation and runtime bounds;
+- protected credential-file references and knowledge-source directories.
 
-Ductor must not own agent leases, run a lease reaper, execute agent work, or be
-required for Paperclip's continued agent operation.
+Configuration contains references, not credential values. Unknown or unsupported
+options must produce errors instead of being ignored. A missing selected account,
+credential, pool or service is a blocked prerequisite, not permission to choose a
+different one.
 
-## Paperclip addon
+## What Ductor changes
 
-A separately versioned Paperclip addon and its restricted runtime companion own
-Incus environment acquisition, approved agent profiles, resource admission,
-bindings, delegation, guest execution and runtime reconciliation. Their durable
-state and credentials belong to their services, independently of Ductor.
+Ansible performs service-host operations through verified SSH. Deployment renders
+the chosen upstream configuration, prepares explicit host directories, and
+reconciles the selected services. Re-running deployment uses saved configuration.
+An explicit upgrade changes the reviewed version; deployment does not follow a
+floating `latest` tag.
 
-Paperclip remains the task, approval, session and team dashboard. MemPalace holds
-scoped knowledge and checkpoints; ContextForge grants approved MCP access;
-OpenBao supplies scoped external credentials; Incus and opencode-platform supply
-execution isolation. Native Paperclip authentication and Codex connections keep
-their own supported ownership.
+Ductor must not own an agent daemon, work queue, execution lease, reaper or model
+request. Installed applications retain their own durable state and lifecycle.
 
-Deployment configures these integrations. Simply mentioning a memory service in
-an agent prompt is not an authorization boundary or a backup mechanism.
+The operator supplies DNS and TLS through an existing reverse proxy. Ductor does
+not request public certificates. Bind addresses and advertised URLs are distinct:
+loopback service binding is appropriate only when the reverse proxy is reachable
+on that same host.
 
-## Verification gates
+## Functional acceptance
 
-- Controller startup and service operations require no mounted Docker socket.
-- Same-server and remote deployment use the same verified SSH transport.
-- Dependency preparation is performed on the selected SSH host.
-- Bind-mounted service data is stored on that host and survives recreation.
-- Resource admission and published-port collisions are checked per host.
-- Ductor can stop after setup without preventing addon runtime operation.
-- Missing credentials, approved scopes or capacity fail closed.
-- Each service can be inspected and updated through Ductor.
-- External domains and ports are configurable; operator-managed TLS is the default.
-- CI distinguishes real SSH/container checks from mocked Incus/provider checks.
+- The standalone controller and container use the same configuration and SSH path.
+- The controller has no Docker socket mount and does not require host networking.
+- Same-server and remote deployment both verify SSH host keys.
+- Service storage survives container recreation and controller removal.
+- Host budgets reserve operating-system capacity; published ports cannot collide.
+- Incus quotas bound workers independently of Ductor.
+- Explicit placement does not fall back to local execution or another pool.
+- Missing selected credentials prevent activation or execution.
+- Provider credentials, infrastructure identities and bootstrap secrets stay out
+  of ordinary logs, source control, prompts and worker environments.
+- Backups have protected permissions, and restore is tested before production use.
+- Turning Ductor off does not interrupt new or ongoing native runtime work.
 
-Live Incus, Paperclip/Codex authentication and the complete service integration
-must be tested on actual infrastructure before production-readiness is claimed.
+These are functional requirements. Cost or productivity measurements are not an
+installation gate. Live evidence and remaining gaps are recorded in
+[production qualification](production-qualification.md).

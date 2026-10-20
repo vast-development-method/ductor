@@ -1,0 +1,51 @@
+---
+- name: Create protected OpenBao bind directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: "{{ bao_uid }}"
+    group: "{{ bao_gid }}"
+    mode: '0700'
+  loop:
+    - "{{ bao_service_root }}"
+    - "{{ bao_service_root }}/data"
+    - "{{ bao_service_root }}/audit"
+    - "{{ bao_service_root }}/backups"
+
+- name: Copy reviewed OpenBao deployment files
+  ansible.builtin.copy:
+    src: "{{ ductor_render_root }}/services/{{ ductor_service.id }}/{{ item }}"
+    dest: "{{ bao_service_root }}/{{ item }}"
+    owner: "{{ bao_uid }}"
+    group: "{{ bao_gid }}"
+    mode: '0600'
+  loop: [compose.yaml, server.hcl]
+
+- name: Validate rendered OpenBao Compose
+  ansible.builtin.command:
+    argv: [docker, compose, --file, "{{ bao_service_root }}/compose.yaml", config, --quiet]
+  changed_when: false
+
+- name: Pull the pinned OpenBao image
+  ansible.builtin.command:
+    argv: [docker, compose, --file, "{{ bao_service_root }}/compose.yaml", pull]
+  changed_when: true
+
+- name: Start persistent OpenBao independently of Ductor
+  ansible.builtin.command:
+    argv: [docker, compose, --file, "{{ bao_service_root }}/compose.yaml", up, --detach, --remove-orphans]
+  changed_when: true
+
+- name: Wait for OpenBao API, allowing the explicit initialization or unseal phase
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:{{ ductor_service.port | default(8200) }}/v1/sys/health"
+    status_code: [200, 429, 501, 503]
+    return_content: false
+  register: bao_health
+  until: bao_health.status | default(0) in [200, 429, 501, 503]
+  retries: 20
+  delay: 3
+
+- name: Report OpenBao initialization requirement
+  ansible.builtin.debug:
+    msg: "OpenBao API is reachable. HTTP {{ bao_health.status }}; 501 requires bootstrap, 503 requires unseal. These are not ready states."

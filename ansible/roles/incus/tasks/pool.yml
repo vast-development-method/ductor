@@ -1,0 +1,174 @@
+---
+- name: Verify the approved existing worker network
+  ansible.builtin.command:
+    argv: [incus, network, show, "{{ ductor_pool.network }}", --project, default]
+  changed_when: false
+  check_mode: false
+
+- name: Verify the existing worker ACL
+  ansible.builtin.command:
+    argv: [incus, network, acl, show, "{{ ductor_pool.network_acl }}", --project, default]
+  changed_when: false
+  check_mode: false
+
+- name: Verify the existing storage pool
+  ansible.builtin.command:
+    argv: [incus, storage, show, "{{ ductor_pool.storage_pool }}"]
+  changed_when: false
+  check_mode: false
+
+- name: Inspect the exact approved source image
+  ansible.builtin.command:
+    argv: [incus, image, list, "{{ ductor_pool.image_fingerprint }}", --project, "{{ ductor_pool.image_source_project }}", --format, json]
+  register: ductor_source_image
+  changed_when: false
+  check_mode: false
+
+- name: Import an explicitly approved image artifact if absent
+  ansible.builtin.include_tasks: import-image.yml
+  when:
+    - ductor_source_image.stdout | from_json | length == 0
+    - ductor_pool.image_import is defined
+    - ductor_action | default('deploy') in ['deploy', 'update']
+
+- name: Require the approved VM image and worker runtime attestation
+  ansible.builtin.assert:
+    that:
+      - (ductor_source_image.stdout | from_json | length) == 1
+      - (ductor_source_image.stdout | from_json)[0].fingerprint == ductor_pool.image_fingerprint
+      - (ductor_source_image.stdout | from_json)[0].type == 'virtual-machine'
+      - (ductor_source_image.stdout | from_json)[0].properties.get('user.ductor.openclaw.node_version', '') == ductor_pool.worker_node_version
+    fail_msg: "Approved VM image is absent or lacks matching user.ductor.openclaw.node_version attestation. Existing opencode-platform Node 22 images cannot run OpenClaw v2026.10.5. Rebuild and verify the image with Node 24.16+ or 26.1+, record its property and immutable fingerprint, then retry. Ductor will not mutate the platform image."
+
+- name: Read existing projects
+  ansible.builtin.command:
+    argv: [incus, project, list, --format, json]
+  register: ductor_projects
+  changed_when: false
+  check_mode: false
+
+- name: Resolve project ownership
+  ansible.builtin.set_fact:
+    ductor_existing_project: "{{ ductor_projects.stdout | from_json | selectattr('name', 'equalto', ductor_pool.project) | list }}"
+    ductor_desired_project: "{{ lookup('ansible.builtin.file', ductor_render_root + '/incus/' + ductor_pool.id + '/project.json') | from_json }}"
+    ductor_desired_profile: "{{ lookup('ansible.builtin.file', ductor_render_root + '/incus/' + ductor_pool.id + '/profile.json') | from_json }}"
+
+- name: Refuse to adopt another project's authority or quotas
+  ansible.builtin.assert:
+    that:
+      - ductor_existing_project | length == 0 or ductor_existing_project[0].config.get('user.ductor.pool', '') == ductor_pool.id
+      - ductor_pool.project not in ['default', 'vdm-agents']
+      - ductor_pool.allow_vm_lowlevel | bool
+    fail_msg: "The worker project must be separately owned by Ductor; Crabbox needs acknowledged VM low-level permission for volatile.uuid. Never reuse the platform project."
+
+- name: Verify deployed project, image, profile and client trust without mutation
+  ansible.builtin.include_tasks: preflight.yml
+  when: ductor_action | default('deploy') == 'preflight'
+
+- name: Apply host deployment configuration
+  when: ductor_action | default('deploy') in ['deploy', 'update']
+  block:
+    - name: Create the dedicated project
+      ansible.builtin.command:
+        argv: [incus, project, create, "{{ ductor_pool.project }}", -c, "user.ductor.pool={{ ductor_pool.id }}"]
+      when: ductor_existing_project | length == 0
+
+    - name: Apply aggregate project quotas and restrictions
+      ansible.builtin.command:
+        argv: [incus, project, edit, "{{ ductor_pool.project }}"]
+        stdin: "{{ ductor_desired_project | to_json }}"
+      when: ductor_existing_project | length == 0 or (ductor_existing_project[0].config | combine(ductor_desired_project.config)) != ductor_existing_project[0].config or ductor_existing_project[0].description != ductor_desired_project.description
+
+    - name: Read project profiles
+      ansible.builtin.command:
+        argv: [incus, profile, list, --project, "{{ ductor_pool.project }}", --format, json]
+      register: ductor_profiles
+      changed_when: false
+      check_mode: false
+
+    - name: Resolve the worker profile
+      ansible.builtin.set_fact:
+        ductor_existing_profile: "{{ ductor_profiles.stdout | from_json | selectattr('name', 'equalto', ductor_pool.profile) | list }}"
+
+    - name: Create the worker profile
+      ansible.builtin.command:
+        argv: [incus, profile, create, "{{ ductor_pool.profile }}", --project, "{{ ductor_pool.project }}"]
+      when: ductor_existing_profile | length == 0
+
+    - name: Apply per-instance resource limits and approved network ACL
+      ansible.builtin.command:
+        argv: [incus, profile, edit, "{{ ductor_pool.profile }}", --project, "{{ ductor_pool.project }}"]
+        stdin: "{{ ductor_desired_profile | to_json }}"
+      when: ductor_existing_profile | length == 0 or ductor_existing_profile[0].config != ductor_desired_profile.config or ductor_existing_profile[0].devices != ductor_desired_profile.devices
+
+    - name: Read approved image alias in the destination project
+      ansible.builtin.command:
+        argv: [incus, image, alias, list, --project, "{{ ductor_pool.project }}", --format, json]
+      register: ductor_image_aliases
+      changed_when: false
+      check_mode: false
+
+    - name: Resolve immutable image alias
+      ansible.builtin.set_fact:
+        ductor_existing_alias: "{{ ductor_image_aliases.stdout | from_json | selectattr('name', 'equalto', 'ductor-' + ductor_pool.image_fingerprint) | list }}"
+
+    - name: Reject a retargeted immutable alias
+      ansible.builtin.assert:
+        that: ductor_existing_alias | length == 0 or ductor_existing_alias[0].target == ductor_pool.image_fingerprint
+        fail_msg: "The approved worker image alias has changed identity; restore it before deploying."
+
+    - name: Copy the approved image into the isolated project
+      ansible.builtin.command:
+        argv: [incus, image, copy, "local:{{ ductor_pool.image_fingerprint }}", 'local:', --project, "{{ ductor_pool.image_source_project }}", --target-project, "{{ ductor_pool.project }}", --alias, "ductor-{{ ductor_pool.image_fingerprint }}", --vm]
+      when: ductor_existing_alias | length == 0
+
+    - name: Create trust input directory
+      ansible.builtin.file:
+        path: /etc/ductor/incus-trust
+        state: directory
+        owner: root
+        group: root
+        mode: '0700'
+
+    - name: Stage only the runtime public client certificate
+      ansible.builtin.copy:
+        src: "{{ ductor_pool.client_certificate_file }}"
+        dest: "/etc/ductor/incus-trust/{{ ductor_pool.id }}.crt"
+        owner: root
+        group: root
+        mode: '0600'
+      diff: false
+      no_log: true
+
+    - name: Compute runtime certificate identity
+      ansible.builtin.command:
+        argv: [openssl, x509, -in, "/etc/ductor/incus-trust/{{ ductor_pool.id }}.crt", -noout, -fingerprint, -sha256]
+      register: ductor_cert_fingerprint
+      changed_when: false
+      check_mode: false
+
+    - name: Read current Incus client trust
+      ansible.builtin.command:
+        argv: [incus, config, trust, list, --format, json]
+      register: ductor_trust
+      changed_when: false
+      check_mode: false
+      no_log: true
+
+    - name: Resolve the exact runtime client trust
+      ansible.builtin.set_fact:
+        ductor_existing_trust: "{{ ductor_trust.stdout | from_json | selectattr('fingerprint', 'equalto', ductor_cert_fingerprint.stdout.split('=')[-1] | replace(':', '') | lower | trim) | list }}"
+      no_log: true
+
+    - name: Reject existing trust with broader project authority
+      ansible.builtin.assert:
+        that:
+          - ductor_existing_trust | length == 0 or (ductor_existing_trust[0].restricted and ductor_existing_trust[0].projects == [ductor_pool.project])
+        fail_msg: "Use a dedicated certificate restricted to this worker project; Ductor will not reuse unrestricted or cross-project trust."
+      no_log: true
+
+    - name: Register project-restricted runtime certificate
+      ansible.builtin.command:
+        argv: [incus, config, trust, add-certificate, "/etc/ductor/incus-trust/{{ ductor_pool.id }}.crt", --projects, "{{ ductor_pool.project }}", --restricted, --name, "ductor-{{ ductor_pool.id }}"]
+      when: ductor_existing_trust | length == 0
+      no_log: true

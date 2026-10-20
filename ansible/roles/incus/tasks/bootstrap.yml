@@ -1,0 +1,160 @@
+---
+- name: Require a supported native package host
+  ansible.builtin.assert:
+    that:
+      - (ansible_facts.distribution == 'Ubuntu' and ansible_facts.distribution_version == '24.04') or (ansible_facts.distribution == 'Debian' and ansible_facts.distribution_major_version == '13')
+      - ductor_incus_bootstrap.enabled | bool
+      - ductor_incus_bootstrap.storage_driver == 'dir'
+    fail_msg: "Fresh bootstrap supports explicit pinned native Incus packages on Ubuntu 24.04 and Debian 13 with directory storage. No package sources or block devices are changed."
+
+- name: Inspect installed Incus package
+  ansible.builtin.command:
+    argv: [dpkg-query, -W, '-f=${Version}', incus]
+  register: ductor_incus_package
+  failed_when: ductor_incus_package.rc not in [0, 1]
+  changed_when: false
+  check_mode: false
+
+- name: Refuse an implicit existing-daemon upgrade
+  ansible.builtin.assert:
+    that: ductor_incus_package.rc == 1 or ductor_incus_package.stdout == ductor_incus_bootstrap.package_version
+    fail_msg: "Existing Incus package differs from the approved bootstrap version. Use a separately planned platform upgrade; Ductor will not upgrade a live daemon."
+
+- name: Install the approved native Incus package and VM dependencies
+  ansible.builtin.apt:
+    name: ["incus={{ ductor_incus_bootstrap.package_version }}", qemu-system, qemu-utils, openssl]
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+    allow_downgrade: false
+  when: ductor_action | default('deploy') in ['bootstrap-workers']
+
+- name: Start the Incus service
+  ansible.builtin.systemd_service:
+    name: incus
+    state: started
+    enabled: true
+  when: ductor_action | default('deploy') in ['bootstrap-workers']
+
+- name: Check required APIs before initializing any network or storage
+  ansible.builtin.command:
+    argv: [incus, query, /1.0]
+  register: ductor_bootstrap_api
+  changed_when: false
+  check_mode: false
+  when: ductor_incus_package.rc == 0 or ductor_action | default('deploy') == 'bootstrap-workers'
+
+- name: Refuse incompatible daemon initialization
+  ansible.builtin.assert:
+    that: "['projects', 'projects_limits', 'projects_limits_disk', 'projects_limits_instances', 'projects_restrictions', 'projects_restricted_storage_pool_access', 'network_acl', 'network_bridge_acl', 'virtual-machines', 'images_target_project'] | difference((ductor_bootstrap_api.stdout | from_json).api_extensions) | length == 0"
+    fail_msg: "The approved package lacks required worker APIs. Approve a suitable Incus version from configured package sources; storage and networking have not been initialized."
+  when: ductor_bootstrap_api is not skipped
+
+- name: Read prior bootstrap ownership marker
+  ansible.builtin.stat:
+    path: /var/lib/ductor/incus-bootstrap.json
+  register: ductor_incus_marker
+
+- name: Read previously applied bootstrap inputs
+  ansible.builtin.slurp:
+    src: /var/lib/ductor/incus-bootstrap.json
+  register: ductor_incus_previous
+  when: ductor_incus_marker.stat.exists
+
+- name: Refuse bootstrap changes to initialized infrastructure
+  ansible.builtin.assert:
+    that: (ductor_incus_previous.content | b64decode | from_json) == ductor_incus_bootstrap
+    fail_msg: "Bootstrap inputs changed on an initialized host; network/storage migration needs an explicit separate change."
+  when: ductor_incus_marker.stat.exists
+
+- name: Inspect existing storage before fresh initialization
+  ansible.builtin.command:
+    argv: [incus, storage, list, --format, json]
+  register: ductor_initial_storage
+  changed_when: false
+  check_mode: false
+  when: not ductor_incus_marker.stat.exists and (ductor_incus_package.rc == 0 or ductor_action | default('deploy') in ['bootstrap-workers'])
+
+- name: Require empty storage before bootstrap adoption
+  ansible.builtin.assert:
+    that: ductor_initial_storage.stdout | from_json | length == 0
+    fail_msg: "Incus already has storage and has no Ductor bootstrap marker. Use existing-infrastructure mode; Ductor never resets or adopts existing initialization."
+  when: not ductor_incus_marker.stat.exists and ductor_initial_storage is not skipped
+
+- name: Inspect existing managed networks before initialization
+  ansible.builtin.command:
+    argv: [incus, network, list, --format, json]
+  register: ductor_initial_networks
+  changed_when: false
+  check_mode: false
+  when: not ductor_incus_marker.stat.exists and (ductor_incus_package.rc == 0 or ductor_action | default('deploy') in ['bootstrap-workers'])
+
+- name: Refuse to adopt existing managed networks
+  ansible.builtin.assert:
+    that: ductor_initial_networks.stdout | from_json | selectattr('managed', 'equalto', true) | list | length == 0
+    fail_msg: "Incus already has managed networking without a Ductor marker; use existing-infrastructure mode."
+  when: not ductor_incus_marker.stat.exists and ductor_initial_networks is not skipped
+
+- name: Inspect existing ACL ownership before fresh initialization
+  ansible.builtin.command:
+    argv: [incus, network, acl, list, --format, json]
+  register: ductor_unowned_acls
+  changed_when: false
+  check_mode: false
+  when: not ductor_incus_marker.stat.exists and (ductor_incus_package.rc == 0 or ductor_action | default('deploy') == 'bootstrap-workers')
+
+- name: Refuse to adopt existing ACLs on an unmarked daemon
+  ansible.builtin.assert:
+    that: ductor_unowned_acls.stdout | from_json | length == 0
+    fail_msg: "Incus already has network ACLs without Ductor bootstrap ownership. Use existing-infrastructure mode; Ductor will not replace them."
+  when: not ductor_incus_marker.stat.exists and ductor_unowned_acls is not skipped
+
+- name: Apply explicitly approved fresh initialization
+  ansible.builtin.command:
+    argv: [incus, admin, init, --preseed]
+    stdin: "{{ lookup('ansible.builtin.file', ductor_render_root + '/incus/bootstrap/' + inventory_hostname + '/preseed.json') }}"
+  when: not ductor_incus_marker.stat.exists and ductor_action | default('deploy') in ['bootstrap-workers']
+
+- name: Create durable deployment ownership directory
+  ansible.builtin.file:
+    path: /var/lib/ductor
+    state: directory
+    owner: root
+    group: root
+    mode: '0700'
+  when: ductor_action | default('deploy') in ['bootstrap-workers']
+
+- name: Record successful bootstrap ownership
+  ansible.builtin.copy:
+    content: "{{ ductor_incus_bootstrap | to_nice_json }}\n"
+    dest: /var/lib/ductor/incus-bootstrap.json
+    owner: root
+    group: root
+    mode: '0600'
+  when: ductor_action | default('deploy') in ['bootstrap-workers']
+
+- name: Read available ACLs
+  ansible.builtin.command:
+    argv: [incus, network, acl, list, --format, json]
+  register: ductor_initial_acls
+  changed_when: false
+  check_mode: false
+  when: ductor_incus_package.rc == 0 or ductor_action | default('deploy') in ['bootstrap-workers']
+
+- name: Create the approved worker ACL
+  ansible.builtin.command:
+    argv: [incus, network, acl, create, "{{ ductor_incus_bootstrap.network_acl }}"]
+  when:
+    - ductor_action | default('deploy') in ['bootstrap-workers']
+    - ductor_initial_acls.stdout | from_json | selectattr('name', 'equalto', ductor_incus_bootstrap.network_acl) | list | length == 0
+
+- name: Apply explicit worker ingress and egress routes
+  ansible.builtin.command:
+    argv: [incus, network, acl, edit, "{{ ductor_incus_bootstrap.network_acl }}"]
+    stdin: "{{ lookup('ansible.builtin.file', ductor_render_root + '/incus/bootstrap/' + inventory_hostname + '/acl.json') }}"
+  when: ductor_action | default('deploy') in ['bootstrap-workers']
+
+- name: Report missing package during read-only preflight
+  ansible.builtin.assert:
+    that: ductor_incus_package.rc == 0 or ductor_action | default('deploy') in ['bootstrap-workers']
+    fail_msg: "Incus is not installed. Run bootstrap-workers to install the pinned package and initialize the approved bridge/storage; preflight and deploy do not bootstrap implicitly."

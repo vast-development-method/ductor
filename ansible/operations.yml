@@ -1,0 +1,50 @@
+---
+- name: Operate selected services through verified SSH
+  hosts: ductor_hosts
+  gather_facts: false
+  serial: 1
+  any_errors_fatal: true
+  tasks:
+    - name: Validate transport and operation
+      ansible.builtin.assert:
+        that:
+          - ansible_connection == 'ssh'
+          - ductor_action in ['status', 'restart', 'backup']
+        fail_msg: Unsupported operation or transport.
+
+    - name: Perform native OpenBao operations
+      ansible.builtin.include_role:
+        name: openbao
+      loop: "{{ ductor_services | selectattr('kind', 'equalto', 'openbao') | list }}"
+      loop_control:
+        loop_var: ductor_service
+        label: "{{ ductor_service.id }}"
+
+    - name: Perform selected gateway operations
+      ansible.builtin.include_tasks: roles/host/tasks/service-operation.yml
+      loop: "{{ ductor_services | selectattr('kind', 'equalto', 'openclaw') | list }}"
+      loop_control:
+        loop_var: ductor_service
+        label: "{{ ductor_service.id }}"
+      when: ductor_action in ['status', 'restart', 'backup']
+
+    - name: Read worker instance status from Incus
+      ansible.builtin.command:
+        argv: [incus, list, --project, '{{ ductor_pool.project }}', --columns, nst, --format, csv]
+      loop: "{{ ductor_pools }}"
+      loop_control:
+        loop_var: ductor_pool
+        label: "{{ ductor_pool.id }}"
+      register: ductor_worker_status
+      changed_when: false
+      when: ductor_action == 'status'
+
+    - name: Report worker status
+      ansible.builtin.debug:
+        msg: "{{ item.stdout_lines }}"
+      loop: "{{ ductor_worker_status.results | default([]) }}"
+      loop_control:
+        label: "{{ item.ductor_pool.id }}"
+      when:
+        - ductor_action == 'status'
+        - item.stdout is defined

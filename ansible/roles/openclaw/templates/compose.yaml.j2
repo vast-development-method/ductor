@@ -1,0 +1,103 @@
+name: {{ ('ductor-' ~ ductor_service.id) | to_json }}
+services:
+  gateway:
+    image: {{ ('ductor-openclaw-' ~ ductor_service.id ~ ':2026.10.5') | to_json }}
+    build:
+      context: ./image
+      args:
+        OPENCLAW_IMAGE: {{ ductor_service.image | to_json }}
+    user: {{ ((ductor_service.uid | default(1000) | string) ~ ':' ~ (ductor_service.gid | default(1000) | string)) | to_json }}
+    init: true
+    restart: unless-stopped
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    cpus: {{ ((ductor_service.cpus - 0.25) if ductor_openclaw_bao_enabled else ductor_service.cpus) | to_json }}
+    mem_limit: {{ (((ductor_service.memory_mib - 128) if ductor_openclaw_bao_enabled else ductor_service.memory_mib) | string ~ 'm') | to_json }}
+    memswap_limit: {{ (((ductor_service.memory_mib - 128) if ductor_openclaw_bao_enabled else ductor_service.memory_mib) | string ~ 'm') | to_json }}
+    pids_limit: 512
+    ulimits:
+      core: {soft: 0, hard: 0}
+    logging:
+      driver: json-file
+      options: {max-size: "10m", max-file: "3"}
+    environment:
+      HOME: /home/node
+      OPENCLAW_HOME: /home/node
+      OPENCLAW_STATE_DIR: /home/node/.openclaw
+      OPENCLAW_CONFIG_DIR: /home/node/.openclaw
+      OPENCLAW_CONFIG_PATH: /home/node/.openclaw/openclaw.json
+      OPENCLAW_WORKSPACE_DIR: /home/node/.openclaw/workspaces
+      OPENCLAW_GATEWAY_PORT: "18789"
+      OPENCLAW_DISABLE_BONJOUR: "1"
+      XDG_STATE_HOME: /home/node/.local/state
+{% if ductor_openclaw_bao_enabled %}
+      VAULT_ADDR: {{ ductor_openclaw_bao.url | to_json }}
+      OPENCLAW_VAULT_AUTH_METHOD: token_file
+      VAULT_TOKEN_FILE: /run/openbao/token
+      OPENCLAW_VAULT_KV_MOUNT: {{ ductor_openclaw_bao.kv_mount | default('secret') | to_json }}
+      OPENCLAW_VAULT_KV_VERSION: "2"
+{% if ductor_openclaw_bao.ca_file is defined %}
+      NODE_EXTRA_CA_CERTS: /etc/openbao/ca.pem
+{% endif %}
+{% endif %}
+    volumes:
+      - ./state:/home/node/.openclaw
+      - ./auth:/home/node/.config/openclaw
+      - ./crabbox-state:/home/node/.local/state/crabbox
+      - ./candidate:/run/ductor-candidate:ro
+      - ./secrets/gateway-token:/run/secrets/gateway-token:ro
+      - ./crabbox/config:/etc/ductor/crabbox:ro
+      - ./crabbox/bin:/usr/local/lib/ductor:ro
+      - ./crabbox/incus:/etc/ductor/incus:ro
+{% if ductor_openclaw_bao_enabled %}
+      - {{ ('/run/ductor/' ~ ductor_service.id ~ '/bao:/run/openbao:ro') | to_json }}
+{% if ductor_openclaw_bao.ca_file is defined %}
+      - ./bao-ca.pem:/etc/openbao/ca.pem:ro
+{% endif %}
+{% endif %}
+    ports:
+      - {{ (ductor_service.bind_address ~ ':' ~ (ductor_service.port | string) ~ ':18789') | to_json }}
+    command: ["node", "dist/index.js", "gateway", "--bind", "lan", "--port", "18789"]
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:18789/startupz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 15s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+{% if ductor_openclaw_bao_enabled %}
+    depends_on:
+      bao-agent:
+        condition: service_healthy
+  bao-agent:
+    image: {{ ductor_openclaw_bao.image | to_json }}
+    user: {{ ((ductor_service.uid | default(1000) | string) ~ ':' ~ (ductor_service.gid | default(1000) | string)) | to_json }}
+    init: true
+    restart: unless-stopped
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    cpus: 0.25
+    mem_limit: 128m
+    memswap_limit: 128m
+    pids_limit: 64
+    ulimits:
+      core: {soft: 0, hard: 0}
+    logging:
+      driver: json-file
+      options: {max-size: "10m", max-file: "3"}
+    environment:
+      SKIP_CHOWN: "1"
+    command: ["bao", "agent", "-config=/etc/openbao/agent.hcl"]
+    volumes:
+      - ./agent.hcl:/etc/openbao/agent.hcl:ro
+      - ./bao-auth:/etc/openbao/auth:ro
+      - {{ ('/run/ductor/' ~ ductor_service.id ~ '/bao:/run/openbao') | to_json }}
+{% if ductor_openclaw_bao.ca_file is defined %}
+      - ./bao-ca.pem:/etc/openbao/ca.pem:ro
+{% endif %}
+    healthcheck:
+      test: ["CMD-SHELL", "test -s /run/openbao/token"]
+      interval: 10s
+      timeout: 3s
+      retries: 12
+      start_period: 10s
+{% endif %}

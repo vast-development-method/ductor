@@ -1,0 +1,27 @@
+---
+- name: Require a scoped OpenBao snapshot operator credential reference
+  ansible.builtin.assert:
+    that:
+      - ductor_config.credentials.openbao_token_file is defined
+    fail_msg: "Native Raft snapshots require credentials.openbao_token_file with snapshot read permission."
+
+- name: Choose unique snapshot path
+  ansible.builtin.set_fact:
+    bao_snapshot_name: "{{ ductor_service.id }}-{{ now(utc=true, fmt='%Y%m%dT%H%M%S%fZ') }}.snap"
+
+- name: Save encrypted Raft state using native OpenBao snapshot command
+  ansible.builtin.command:
+    argv: [docker, compose, --file, "{{ bao_service_root }}/compose.yaml", exec, -T, -e, BAO_TOKEN, openbao, bao, operator, raft, snapshot, save, "/openbao/backups/{{ bao_snapshot_name }}"]
+  environment:
+    BAO_TOKEN: "{{ lookup('ansible.builtin.file', ductor_config.credentials.openbao_token_file) | trim }}"
+  no_log: true
+  changed_when: true
+
+- name: Protect the snapshot file
+  ansible.builtin.file:
+    path: "{{ bao_service_root }}/backups/{{ bao_snapshot_name }}"
+    mode: '0600'
+
+- name: Report snapshot location only
+  ansible.builtin.debug:
+    msg: "{{ bao_service_root }}/backups/{{ bao_snapshot_name }}"

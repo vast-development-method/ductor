@@ -1,0 +1,114 @@
+---
+- name: Check whether managed host Python is installed
+  ansible.builtin.raw: test -x /usr/bin/python3
+  register: ductor_python_probe
+  changed_when: false
+  failed_when: false
+
+- name: Require host Python for read-only preflight
+  ansible.builtin.assert:
+    that: ductor_python_probe.rc == 0
+    fail_msg: Python 3 is missing. Deploy installs the OS Python prerequisite; preflight is read-only.
+  when: ductor_action == 'preflight'
+
+- name: Bootstrap Python on supported Debian-family hosts
+  ansible.builtin.raw: >-
+    . /etc/os-release &&
+    case "$ID:$VERSION_ID" in ubuntu:24.04|debian:12|debian:13) ;; *) exit 42 ;; esac &&
+    apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y python3 python3-apt
+  when:
+    - ductor_python_probe.rc != 0
+    - ductor_action in ['deploy', 'update', 'bootstrap-workers']
+  changed_when: true
+
+- name: Gather host operating system and resource facts
+  ansible.builtin.setup:
+    gather_subset: [min, hardware, network, virtual]
+
+- name: Require a supported service host and declared physical capacity
+  ansible.builtin.assert:
+    that:
+      - >-
+        (ansible_facts.distribution == 'Ubuntu' and ansible_facts.distribution_version == '24.04')
+        or (ansible_facts.distribution == 'Debian' and ansible_facts.distribution_major_version in ['12', '13'])
+      - ansible_facts.architecture in ['x86_64', 'aarch64']
+      - ansible_facts.processor_vcpus | int >= ductor_host.resources.cpus | float
+      - ansible_facts.memtotal_mb | int >= (ductor_host.resources.memory_mib | int * 0.95)
+      - ansible_connection == 'ssh'
+    fail_msg: Host OS, architecture, SSH transport, or declared physical resource capacity failed validation.
+
+- name: Find the filesystem containing the data root without creating it
+  ansible.builtin.command:
+    argv:
+      - /usr/bin/python3
+      - -c
+      - "import json,os,sys; p=os.path.abspath(sys.argv[1]);\nwhile not os.path.exists(p): p=os.path.dirname(p)\ns=os.statvfs(p); print(json.dumps({'path':p,'total':s.f_blocks*s.f_frsize,'available':s.f_bavail*s.f_frsize}))"
+      - "{{ ductor_host.data_root }}"
+  register: ductor_storage_probe
+  changed_when: false
+
+- name: Verify the storage capacity and retained OS headroom
+  ansible.builtin.assert:
+    that:
+      - (ductor_storage_probe.stdout | from_json).total | int >= (ductor_host.resources.disk_gib | int * 1073741824)
+      - (ductor_storage_probe.stdout | from_json).available | int >= (ductor_host.resources.reserve_disk_gib | int * 1073741824)
+    fail_msg: Data filesystem is smaller than the declared budget or has exhausted the retained disk headroom.
+
+- name: Prepare explicit deployment storage
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: root
+    group: root
+    mode: '0700'
+  loop:
+    - "{{ ductor_host.data_root }}"
+    - "{{ ductor_host.data_root }}/services"
+    - "{{ ductor_host.data_root }}/backups"
+  when: ductor_action in ['deploy', 'update', 'bootstrap-workers']
+
+- name: Read the installed Docker engine version
+  ansible.builtin.command:
+    argv: [docker, version, --format, '{{ "{{.Server.Version}}" }}']
+  register: ductor_docker_probe
+  changed_when: false
+  failed_when: false
+  when:
+    - ductor_services | length > 0
+    - ductor_action != 'bootstrap-workers'
+
+- name: Install the missing container engine
+  ansible.builtin.include_tasks: docker.yml
+  when:
+    - ductor_services | length > 0
+    - ductor_action != 'bootstrap-workers'
+    - ductor_docker_probe.rc != 0
+    - ductor_action in ['deploy', 'update', 'bootstrap-workers']
+
+- name: Validate the reachable Docker daemon
+  ansible.builtin.command:
+    argv: [docker, version, --format, '{{ "{{.Server.Version}}" }}']
+  register: ductor_docker_version
+  changed_when: false
+  when:
+    - ductor_services | length > 0
+    - ductor_action != 'bootstrap-workers'
+
+- name: Validate Docker Compose availability
+  ansible.builtin.command:
+    argv: [docker, compose, version, --short]
+  register: ductor_compose_version
+  changed_when: false
+  when:
+    - ductor_services | length > 0
+    - ductor_action != 'bootstrap-workers'
+
+- name: Require a current engine and Compose with wait support
+  ansible.builtin.assert:
+    that:
+      - ductor_docker_version.stdout is version('28.0.0', '>=')
+      - (ductor_compose_version.stdout | regex_replace('^v', '')) is version('2.24.0', '>=')
+    fail_msg: Upgrade the Docker host explicitly; Ductor does not replace an existing engine automatically.
+  when:
+    - ductor_services | length > 0
+    - ductor_action != 'bootstrap-workers'

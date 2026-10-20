@@ -1,0 +1,54 @@
+---
+- name: Create a private backup directory
+  ansible.builtin.file:
+    path: "{{ ductor_host.data_root }}/backups"
+    state: directory
+    owner: root
+    group: root
+    mode: '0700'
+
+- name: Choose a unique archive name
+  ansible.builtin.set_fact:
+    ductor_backup_file: "{{ ductor_host.data_root }}/backups/{{ ductor_service.id }}-{{ now(utc=true, fmt='%Y%m%dT%H%M%S%fZ') }}.tar.gz"
+
+- name: Capture exactly the services running before the backup
+  ansible.builtin.command:
+    argv: [docker, compose, --file, '{{ ductor_host.data_root }}/services/{{ ductor_service.id }}/compose.yaml', ps, --status, running, --services]
+  register: ductor_prebackup_running
+  changed_when: false
+
+- name: Quiesce, archive, and restore the previous running state
+  block:
+    - name: Stop writers for a consistent archive
+      ansible.builtin.command:
+        argv: "{{ ['docker', 'compose', '--file', ductor_host.data_root ~ '/services/' ~ ductor_service.id ~ '/compose.yaml', 'stop', '--timeout', '60'] + ductor_prebackup_running.stdout_lines }}"
+      when: ductor_prebackup_running.stdout_lines | length > 0
+      changed_when: true
+
+    - name: Archive service configuration and persistent state
+      ansible.builtin.command:
+        argv: [tar, --create, --gzip, --file, '{{ ductor_backup_file }}.partial', --directory, '{{ ductor_host.data_root }}/services/{{ ductor_service.id }}', .]
+      changed_when: true
+      no_log: true
+
+    - name: Restrict the archive because it contains credentials and team data
+      ansible.builtin.file:
+        path: "{{ ductor_backup_file }}.partial"
+        owner: root
+        group: root
+        mode: '0600'
+
+    - name: Publish only a complete archive
+      ansible.builtin.command:
+        argv: [mv, --, '{{ ductor_backup_file }}.partial', '{{ ductor_backup_file }}']
+      changed_when: true
+  always:
+    - name: Restart only the services that were running before the backup
+      ansible.builtin.command:
+        argv: "{{ ['docker', 'compose', '--file', ductor_host.data_root ~ '/services/' ~ ductor_service.id ~ '/compose.yaml', 'start', '--wait', '--wait-timeout', '180'] + ductor_prebackup_running.stdout_lines }}"
+      when: ductor_prebackup_running.stdout_lines | length > 0
+      changed_when: true
+
+- name: Report the completed host-local archive
+  ansible.builtin.debug:
+    msg: "Backup: {{ ductor_backup_file }}. Transfer to encrypted off-host storage and test recovery separately."

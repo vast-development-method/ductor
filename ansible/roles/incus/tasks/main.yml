@@ -1,0 +1,58 @@
+---
+# Host preparation only. Runtime leases and cleanup belong to OpenClaw/Crabbox.
+- name: Resolve explicit fresh-host bootstrap request
+  ansible.builtin.set_fact:
+    ductor_incus_bootstrap: "{{ (ductor_config.incus.bootstrap | default({})).get(inventory_hostname, {}) }}"
+
+- name: Bootstrap approved fresh Incus infrastructure
+  ansible.builtin.include_tasks: bootstrap.yml
+  when: ductor_incus_bootstrap | length > 0
+
+- name: Verify the existing Incus installation
+  ansible.builtin.command:
+    argv: [incus, version]
+  changed_when: false
+  check_mode: false
+  when: ductor_pools | length > 0
+
+- name: Discover the live Incus API capabilities
+  ansible.builtin.command:
+    argv: [incus, query, /1.0]
+  register: ductor_incus_server
+  changed_when: false
+  check_mode: false
+  when: ductor_pools | length > 0
+
+- name: Require actual quota, ACL, and restricted project support
+  ansible.builtin.assert:
+    that: "['projects', 'projects_limits', 'projects_limits_disk', 'projects_limits_instances', 'projects_restrictions', 'projects_restricted_storage_pool_access', 'network_acl', 'network_bridge_acl', 'virtual-machines', 'images_target_project'] | difference((ductor_incus_server.stdout | from_json).api_extensions) | length == 0"
+    fail_msg: "This Incus daemon lacks required worker isolation APIs. Approve a supported package from configured sources; Ductor does not add package repositories or silently reduce restrictions."
+  when: ductor_pools | length > 0
+
+- name: Verify VM acceleration is available
+  ansible.builtin.stat:
+    path: /dev/kvm
+  register: ductor_kvm
+  when: ductor_pools | length > 0
+
+- name: Require initialized Incus with VM support
+  ansible.builtin.assert:
+    that: ductor_kvm.stat.exists
+    fail_msg: "Prepare this host using opencode-platform bootstrap first; Ductor does not initialize storage, change package sources, or silently downgrade VMs to containers."
+  when: ductor_pools | length > 0
+
+- name: Configure each explicitly selected worker pool
+  ansible.builtin.include_tasks: pool.yml
+  loop: "{{ ductor_pools }}"
+  loop_control:
+    loop_var: ductor_pool
+    label: "{{ ductor_pool.id }}"
+  when: ductor_action | default('deploy') != 'bootstrap-workers'
+
+- name: Enroll daemon certificates over verified SSH after explicit bootstrap
+  ansible.builtin.include_tasks: enroll-server.yml
+  loop: "{{ ductor_pools }}"
+  loop_control:
+    loop_var: ductor_pool
+    label: "{{ ductor_pool.id }}"
+  when: ductor_action | default('deploy') == 'bootstrap-workers'

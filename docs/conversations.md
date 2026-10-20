@@ -1,107 +1,139 @@
-# Talk to the team in Paperclip
+# Conversations, accounts and company knowledge
 
-Ductor uses the **Agent Chat** feature shipped in Paperclip `v2026.1012.0` for
-ongoing conversations with a secretary or coordinator. It is an experimental
-Paperclip feature with a persisted instance setting. It does not require a
-second chat service, a new dashboard, or a separate model connection.
+Open the configured OpenClaw HTTPS URL to talk to the team. Ductor is the setup
+and operations console; it does not remain in the conversation or execute work.
 
-## Open the native conversation
+## Gateway and team access
 
-After connecting Ductor to your Paperclip company:
+Each gateway has an explicit agent roster and one required worker pool. The
+orchestrator is the primary conversational agent. It can delegate only to the
+configured agents. Workers return evidence and artifact identifiers; a separate
+reviewer can inspect those results and return corrections.
+
+A token-authenticated gateway is a trusted-owner domain. Named team members need
+an identity-aware reverse proxy and the service's `team` configuration. Configure
+exact trusted proxy addresses, an identity header, required headers, allowed users
+and administrators. The proxy must authenticate the user, overwrite identity
+headers and prevent direct access to the private origin. A header being present
+is not proof that a JWT was validated.
+
+Use native OpenClaw user/role administration for final role assignment and verify
+access through the real proxy before inviting the team. Separate gateways are
+required for mutually untrusted teams or independently isolated accounts.
+
+## Model accounts
+
+An agent declares an exact `provider/model` and one named account
+profile, or the gateway declares a scoped OpenBao provider key. Configuration
+metadata does not authenticate an account.
+
+Use Ductor's `login` command for the selected gateway, agent and provider. It
+opens the native provider sign-in flow over SSH. Then run `activate` to apply the
+configured account ordering and perform native checks. No credential is placed in
+the desired configuration. OAuth/subscription credentials stay in OpenClaw's
+native protected auth storage; supported API-key references use OpenBao.
+
+The currently verified unattended OAuth setup path is OpenAI. Other providers can
+use supported API-key configuration; additional OAuth flows are rejected until
+their native contract is implemented and tested.
+
+The rendered `services/<id>/activation.json` lists every required agent/profile
+enrollment. Complete the list; logging in one agent does not prove all other
+agents have their intended account available.
+
+For the first named-account deployment, run `deploy --stage-only`. It builds and
+validates the gateway, leaving it stopped while the native environment is
+available for `login`. Run `activate` after all required sign-ins. Plain `deploy`
+also attempts activation and returns a blocked result if credentials are missing.
+Changed desired configuration must be staged by deployment before activation;
+activation checks its fingerprints.
+
+There are no configured model fallbacks. A gateway accepts only one account per
+provider; different models from that same account remain possible. Activation
+checks the enrolled account ID, provider and credential type and rejects additional
+visible accounts for the provider. Different subscriptions/accounts for the same
+provider require separate gateways. This avoids treating a preference order as
+strict account binding. An administrator can still change the running service;
+the gateway is not a boundary against its own operator.
+
+For example, with a declared `openai:work` profile:
 
 ```bash
-sudo ductor paperclip conversation enable
-sudo ductor paperclip conversation open
+ductor deploy --stage-only
+ductor login --service team --agent coordinator --provider openai --profile openai:work
+ductor activate --service team
 ```
 
-The first command requires a Paperclip instance administrator. It changes only
-`enableAgentChat`, verifies the saved value, and prints the selected company's
-Chat URL. Repeating it does not change other experimental features. `status` and
-`open` read settings and print the URL; they do not launch a local browser.
+An API-key gateway using OpenBao does not use that profile-login step. Missing
+selected credentials block activation rather than being reported as ready.
 
-The same switch is available in **Settings → Experimental → Agent Chat**. Select
-your company, open **Chat**, and choose the configured secretary/coordinator agent.
-Its profile supplies its model, permitted OpenAI subscription grant, tools, memory
-scope, and execution environment. The conversation command does not create that
-agent or invent a default model/account. Complete normal agent configuration and
-readiness checks first.
+## Bounded delegation and review
 
-The native UI route is `/<company-prefix>/chats`; individual conversations use
-`/<company-prefix>/chats/<agent-reference>`. Ductor retrieves and verifies the
-company prefix instead of relying on the browser's previously selected company.
+The initial runtime uses OpenClaw's native agent loop, including supported Codex
+subscription authentication. The separate Codex-native harness is not enabled
+because its child scheduling limits are a different contract.
 
-## A useful daily workflow
+Runtime settings limit child depth, children per parent, concurrent child work and
+run duration. Allowed child agent IDs are explicit. Workers and reviewers cannot
+spawn more agents; the independent swarm lane and elevated tools are disabled.
+These limits do not replace Incus project quotas, which bound infrastructure use.
 
-Describe the outcome, repository/project, acceptance criteria, and any requested
-approval boundary to your coordinator. Use the conversation to clarify the goal
-and develop a plan. Ask it to delegate implementation and review to appropriate
-agents, and to return links to the resulting project tasks.
+Review is a separate-agent workflow with explicit instructions. It is not an
+unconditional merge or deployment approval gate. The operator retains final
+authority. Reviewers receive the exact artifact/revision and evidence to inspect;
+corrections return to the orchestrator and implementer.
 
-Agent Chat preserves its discussion separately from the execution tasks. Its
-native task handoff includes project context and can return task results to the
-conversation. Open the task cards/links to inspect assignments, runs, comments,
-approvals, and delivered work. A waiting conversation is not a failed worker.
-Ask for status supported by recent run results and work products, rather than
-assuming a task's status label proves progress.
+## Scoped MCP tools
 
-For example:
+A gateway can declare remote HTTPS MCP servers with an explicit tool-name
+allowlist. Each agent lists the servers it is allowed to use; unassigned server
+tools are denied. The initial implementation supports `streamable-http` and
+`sse` transports. Reviewers cannot use external MCP tools in the read-only review
+profile.
 
-> Prepare a plan to improve this repository's onboarding. Ask me before starting
-> implementation. Once I approve, give implementation to the project engineer
-> and independent review to the reviewer. Link the tasks here and tell me when
-> a decision is needed.
+Authenticated MCP and local stdio MCP processes are not configured by this
+release. Credential fields and unsupported transport options are rejected rather
+than passed through as placeholders. Add those integrations only through a
+verified native authentication and scope contract. A remote tool's results remain
+untrusted evidence and cannot change company or infrastructure authority.
 
-The coordinator's grants and policies still determine what it can do. A chat
-message does not bypass capacity admission, account permission, tool approval, or
-runtime checks. Native handoff behavior is implemented upstream; a full live run
-with your models, profiles, network and credentials remains part of deployment
-qualification.
+## Company knowledge
 
-## Invite colleagues
+Keep the company objectives, standards and established technology decisions in a
+versioned Markdown source directory. Provide a concise `AGENTS.md` as the required
+company context. Ductor combines it with role instructions for every configured
+agent workspace. The remaining Markdown sources are copied with their names and
+can be ingested into OpenClaw's native shared wiki during activation.
 
-After the owner has claimed Paperclip and access through your HTTPS proxy is working, use
-**Settings → Members → Invites** in the intended company. Choose the person's role,
-create the invitation, and share its single-use link through your normal channel.
-The recipient signs in with their own Paperclip account. The pinned implementation
-assigns human invitees the selected company role after acceptance; agent invitations
-follow a separate approval process. Members and invitation history remain visible
-in the same settings area.
+The initial configuration enables native memory and a shared Memory Wiki bridge,
+with compiled digest context. This is one trusted-company knowledge domain. It is
+not a cross-company authorization boundary or proof that every relevant fact was
+retrieved. Knowledge ingestion and useful retrieval are live acceptance checks.
 
-These are Paperclip accounts and company permissions. This setup does not add an
-SSO provider or share the owner's login. Ductor does not send invitation messages
-or provision colleagues' accounts on their behalf.
+The wiki is shared by agents within one gateway. Separate gateways have separate
+runtime wiki state; using the same initial source directory does not synchronize
+later findings automatically. Publish reviewed records back to the portable
+knowledge source and explicitly deploy/ingest that revision on other gateways.
+Automatic cross-gateway knowledge publication is an integration gap, not a
+capability implied by the word “shared.”
 
-## Using ChatGPT, Codex, or OpenCode as an outside assistant
+Use the [portable knowledge protocol](knowledge-protocol.md) for reviewed Git
+publication, exact-revision handoffs and explicit ingestion across gateways.
 
-Paperclip's **Assistant Connection (MCP)** is a separate feature. It authorizes an
-external assistant to act with a human's company access; it does not select or
-impersonate the secretary agent.
+Use reviewed records with clear provenance, for example:
 
-An administrator can enable **Settings → Experimental → Assistant connections
-(MCP)**. Then open **Connectors → Assistant Connection (MCP)**, follow its current
-client instructions, and approve the specific company and requested access in
-Paperclip. The native setup page supplies the canonical endpoint and an invitation
-without embedding credentials. Browser clients may require a connector added in
-their own settings; pasting an invitation is not proof that installation or
-consent completed.
+```markdown
+# Project decision: database engine
+Status: accepted
+Project: customer-portal
+Source: repository/commit-or-document-link
+Accepted by: named reviewer
+Supersedes: previous-decision-id, if applicable
 
-The native endpoint is `/mcp/paperclip`. The assistant can inspect work, create
-assigned tasks, and add feedback within its granted scope. Worker models and
-credentials remain configured separately. A cloud-hosted assistant must be able
-to reach your HTTPS endpoint; this installation supplies no tunnel or hosted relay.
+Decision and reasons, including constraints and evidence.
+```
 
-This does not enable Telegram/email automatically. Those channels need their own
-native connector setup, service identities, permissions and delivery checks.
-
-## Source contracts checked
-
-These references describe or implement the exact pinned version:
-
-- [Agent Chat feature map](https://github.com/paperclipai/paperclip/blob/v2026.1012.0/feature-map/agent-chat.md)
-- [Agent Chat landing UI](https://github.com/paperclipai/paperclip/blob/v2026.1012.0/ui/src/pages/AgentChats.tsx)
-- [Experimental settings UI](https://github.com/paperclipai/paperclip/blob/v2026.1012.0/ui/src/pages/InstanceExperimentalSettings.tsx)
-- [Settings API and instance-admin gate](https://github.com/paperclipai/paperclip/blob/v2026.1012.0/server/src/routes/instance-settings.ts)
-- [Conversation execution and handoff instructions](https://github.com/paperclipai/paperclip/blob/v2026.1012.0/server/src/services/agent-conversations.ts)
-- [Company member/invitation UI](https://github.com/paperclipai/paperclip/blob/v2026.1012.0/ui/src/pages/CompanyAccess.tsx)
-- [Human invitation behavior](https://github.com/paperclipai/paperclip/blob/v2026.1012.0/ui/src/components/access/InvitesSection.tsx)
-- [Public assistant MCP setup](https://github.com/paperclipai/paperclip/blob/v2026.1012.0/doc/public-mcp.md)
+Preserve superseded decisions with their replacement references. Keep raw agent
+findings distinguishable from accepted company standards. Promoting a finding to
+company policy is a review action, not an automatic result of a model writing to
+memory. Secrets never belong in company context, wiki records or task results.

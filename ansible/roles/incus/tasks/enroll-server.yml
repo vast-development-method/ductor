@@ -1,0 +1,72 @@
+---
+# The SSH host-key pin establishes server certificate trust on first bootstrap.
+# A later daemon-key change must never silently replace that pin.
+- name: Reject local trust paths with symlink ancestors before enrollment
+  ansible.builtin.command:
+    argv:
+      - "{{ ansible_playbook_python }}"
+      - -c
+      - "from pathlib import Path; import sys; p=Path(sys.argv[1]); assert p.is_absolute(); assert not any(v.is_symlink() for v in (p,*p.parents)), 'Certificate pin path must not traverse symlinks'; assert all(not v.exists() or v.is_dir() for v in p.parents), 'Certificate parent is not a directory'"
+      - "{{ ductor_pool.server_certificate_file }}"
+  delegate_to: localhost
+  vars:
+    ansible_connection: local
+    ansible_python_interpreter: "{{ ansible_playbook_python }}"
+  become: false
+  changed_when: false
+
+- name: Read native Incus server certificate identity over verified SSH
+  ansible.builtin.stat:
+    path: /var/lib/incus/server.crt
+    checksum_algorithm: sha256
+  register: ductor_server_certificate
+
+- name: Inspect controller server certificate pin
+  ansible.builtin.stat:
+    path: "{{ ductor_pool.server_certificate_file }}"
+    checksum_algorithm: sha256
+  register: ductor_server_pin
+  delegate_to: localhost
+  vars:
+    ansible_connection: local
+    ansible_python_interpreter: "{{ ansible_playbook_python }}"
+  become: false
+
+- name: Reject server certificate replacement
+  ansible.builtin.assert:
+    that:
+      - ductor_server_certificate.stat.exists
+      - ductor_server_certificate.stat.isreg
+      - not ductor_server_pin.stat.exists or (ductor_server_pin.stat.isreg and ductor_server_pin.stat.checksum == ductor_server_certificate.stat.checksum)
+    fail_msg: "Incus daemon certificate differs from the existing pin. Investigate rotation; Ductor will not overwrite established trust."
+
+- name: Create private controller pin directory
+  ansible.builtin.stat:
+    path: "{{ ductor_pool.server_certificate_file | dirname }}"
+  delegate_to: localhost
+  vars:
+    ansible_connection: local
+    ansible_python_interpreter: "{{ ansible_playbook_python }}"
+  become: false
+  register: ductor_server_pin_directory
+  when: not ductor_server_pin.stat.exists
+
+- name: Create a missing controller pin directory
+  ansible.builtin.file:
+    path: "{{ ductor_pool.server_certificate_file | dirname }}"
+    state: directory
+    mode: '0700'
+  delegate_to: localhost
+  vars:
+    ansible_connection: local
+    ansible_python_interpreter: "{{ ansible_playbook_python }}"
+  become: false
+  when: not ductor_server_pin.stat.exists and not ductor_server_pin_directory.stat.exists
+
+- name: Fetch first server certificate over the verified SSH connection
+  ansible.builtin.fetch:
+    src: /var/lib/incus/server.crt
+    dest: "{{ ductor_pool.server_certificate_file }}"
+    flat: true
+    validate_checksum: true
+  when: not ductor_server_pin.stat.exists
